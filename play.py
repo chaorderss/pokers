@@ -1,12 +1,12 @@
-import pokers as prs
+import pokers as pkrs
 
 
 def main():
     n_players = int(input("Number of players: "))
     button = int(input("Button: "))
 
-    s = prs.State(n_players=n_players, button=button, seed=1234)
-    print(prs.visualize_trace([s]))
+    s = pkrs.State(n_players=n_players, button=button, seed=1234)
+    print(pkrs.visualize_trace([s]))
 
     while not s.final_state:
         a_ind = int(
@@ -16,14 +16,14 @@ def main():
         )
         a = s.legal_actions[a_ind]
         raised_chips = 0
-        if a == prs.ActionEnum.Raise:
+        if a == pkrs.ActionEnum.Raise:
             clear_line()
             raised_chips = int(input("Chips: "))
 
-        a = prs.Action(action=a, amount=raised_chips)
-        s = s.act(a)
+        a = pkrs.Action(action=a, amount=raised_chips)
+        s = s.apply_action(a)
         clear_line()
-        print(prs.visualize_state(s))
+        print(pkrs.visualize_state(s))
 
 
 def clear_line():
