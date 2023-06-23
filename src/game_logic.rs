@@ -2,6 +2,7 @@ use pyo3::exceptions::PyOSError;
 use pyo3::prelude::*;
 use rand::{seq::SliceRandom, SeedableRng};
 use strum::IntoEnumIterator;
+use std::cmp;
 
 use crate::state::{Action, ActionEnum, ActionRecord, Card, PlayerState, Stage, State};
 
@@ -59,8 +60,8 @@ impl State {
             legal_actions: Vec::new(),
             deck: deck,
             final_state: false,
-            pot: 0, // El pot se actualiza de forma continua (cada bet o raise) o solo cuando termina una ronda?
-            min_bet: 4, // Hay sitios donde pone que la apuesta mínima es 2xBB y otros que es BB
+            pot: 3, // El pot se actualiza de forma continua (cada bet o raise) o solo cuando termina una ronda?
+            min_bet: 2, 
         };
 
         state.legal_actions = legal_actions(&state);
@@ -104,6 +105,7 @@ impl State {
                 let raised_chips = self.min_bet - self.players_state[player].bet_chips;
                 new_state.players_state[player].bet_chips += raised_chips;
                 new_state.players_state[player].stake -= raised_chips;
+                new_state.pot += raised_chips;
             }
 
             ActionEnum::Raise => {
@@ -115,6 +117,7 @@ impl State {
                 new_state.players_state[player].bet_chips += action.amount;
                 new_state.players_state[player].stake -= action.amount;
                 new_state.pot += action.amount;
+                new_state.min_bet = new_state.players_state[player].bet_chips 
             }
 
             ActionEnum::Check => (),
@@ -131,17 +134,20 @@ impl State {
 
         new_state.current_player = (self.current_player + 1) % self.players_state.len() as u64;
         while !self.players_state[new_state.current_player as usize].active {
-            new_state.current_player = (self.current_player + 1) % self.players_state.len() as u64;
+            new_state.current_player = (new_state.current_player + 1) % self.players_state.len() as u64;
         }
 
         // The round ends if:
         // Every player has done call or fold
-        let mut new_stage = self.players_state.iter().filter(|ps| ps.active).all(|ps| {
-            ps.last_stage_action == Some(ActionEnum::Call)
-                || ps.last_stage_action == Some(ActionEnum::Fold)
+        let max_bet = new_state.players_state.iter().map(|ps| ps.bet_chips).max().unwrap();
+        let mut new_stage = new_state.players_state.iter().filter(|ps| ps.active).all(|ps| {
+             ps.bet_chips == max_bet || !ps.active
         });
+
+        new_stage &= max_bet != 0;
+        new_stage &= new_state.players_state.iter().all(|ps| ps.last_stage_action != None);
         // Or every player has done check
-        new_stage |= self
+        new_stage |= new_state
             .players_state
             .iter()
             .filter(|ps| ps.active)
@@ -202,6 +208,15 @@ impl State {
                 ..*ps
             })
             .collect();
+
+        self.min_bet = 0;
+
+        self.current_player = (self.button + 1) % self.players_state.len() as u64;
+        while !self.players_state[self.current_player as usize].active {
+            self.current_player = (self.current_player + 1) % self.players_state.len() as u64;
+        }
+
+
     }
 
     pub fn __str__(&self) -> PyResult<String> {
@@ -221,14 +236,16 @@ fn legal_actions(state: &State) -> Vec<ActionEnum> {
             }
         }
         _ => {
-            if state.min_bet != 0 {
-                illegal_actions.push(ActionEnum::Check);
-            }
+            
         }
     }
 
     if state.min_bet == 0 {
         illegal_actions.push(ActionEnum::Call);
+    }
+
+    if state.min_bet != 0 {
+        illegal_actions.push(ActionEnum::Check);
     }
 
     let legal_actions: Vec<ActionEnum> = ActionEnum::iter()

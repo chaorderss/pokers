@@ -28,7 +28,7 @@ def main():
 
 def clear_line():
     print("\033[A                             \033[A")
-    print("".join([" "] * 100))
+    print("".join([" "] * 200))
     print("\033[A                             \033[A")
 
 
