@@ -48,8 +48,18 @@ pub fn visualize_state(state: &State) -> String {
     let players_bets = state
         .players_state
         .iter()
-        .map(|ps| format!("{0:>3}/{1:<3}", ps.bet_chips, ps.bet_chips + ps.stake))
-        .fold("".to_owned(), |s1, s2| format!("{s1}   {s2}"));
+        .map(|ps| {
+            format!(
+                "{0:>4}/{1:<3}",
+                if ps.active {
+                    ps.bet_chips.to_string()
+                } else {
+                    format!("x{}", ps.bet_chips)
+                },
+                ps.bet_chips + ps.stake,
+            )
+        })
+        .fold("".to_owned(), |s1, s2| format!("{s1}  {s2}"));
 
     let public_cards = state
         .public_cards

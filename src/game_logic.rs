@@ -67,7 +67,7 @@ impl State {
         state
     }
 
-    pub fn act(&self, action: Action) -> Result<State, ActionError> {
+    pub fn apply_action(&self, action: Action) -> Result<State, ActionError> {
         if self.final_state {
             return Err(ActionError::IllegalAction);
         }
@@ -114,6 +114,7 @@ impl State {
                 }
                 new_state.players_state[player].bet_chips += action.amount;
                 new_state.players_state[player].stake -= action.amount;
+                new_state.pot += action.amount;
             }
 
             ActionEnum::Check => (),
@@ -219,14 +220,15 @@ fn legal_actions(state: &State) -> Vec<ActionEnum> {
                 illegal_actions.push(ActionEnum::Check);
             }
         }
-        _ => (),
+        _ => {
+            if state.min_bet != 0 {
+                illegal_actions.push(ActionEnum::Check);
+            }
+        }
     }
 
     if state.min_bet == 0 {
         illegal_actions.push(ActionEnum::Call);
-    }
-    if state.min_bet != 0 {
-        illegal_actions.push(ActionEnum::Check);
     }
 
     let legal_actions: Vec<ActionEnum> = ActionEnum::iter()

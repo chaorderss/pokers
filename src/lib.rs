@@ -17,6 +17,6 @@ fn pokers(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<state::Card>()?;
     m.add_function(wrap_pyfunction!(visualization::visualize_state, m)?)?;
     m.add_function(wrap_pyfunction!(visualization::visualize_trace, m)?)?;
-    //m.add_function(wrap_pyfunction!(parallel::parallel_act, m)?)?;
+    //m.add_function(wrap_pyfunction!(parallel::parallel_apply_action, m)?)?;
     Ok(())
 }
