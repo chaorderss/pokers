@@ -4,7 +4,10 @@ build-backend = "maturin"
 
 [project]
 name = "pokers"
+description = "Embarrassingly simple No Limit Texas Holdem environment for RL"
+readme = "README.md"
 requires-python = ">=3.7"
+keywords = ["poker", "reinforcement learning"]
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
