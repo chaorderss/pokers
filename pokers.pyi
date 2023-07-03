@@ -50,6 +50,7 @@ class PlayerState:
     stake: float
     reward: float
     active: bool
+    def __str__(self) -> str: ...
 
 class StateStatus(Enum):
     Ok = 0
