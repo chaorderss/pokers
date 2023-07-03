@@ -1,6 +1,4 @@
-import pytest
 import pokers as pkrs
-import numpy as np
 import json
 
 
@@ -26,7 +24,12 @@ def test_game_logic_against_pluribus_logs():
             deck.append(c)
 
         pkrs_state = pkrs.State.from_deck(
-            n_players=n_players, button=button, deck=deck, sb=50, bb=100, stake=np.inf
+            n_players=n_players,
+            button=button,
+            deck=deck,
+            sb=50,
+            bb=100,
+            stake=float("inf"),
         )
         print(f"|{i}> game: {pb_hand['game']}, index: {pb_hand['index']}")
         print(pkrs.visualize_trace([pkrs_state]))

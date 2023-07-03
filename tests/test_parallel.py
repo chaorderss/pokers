@@ -1,6 +1,4 @@
-import pytest
 import pokers as pkrs
-import numpy as np
 import json
 from itertools import zip_longest
 
@@ -38,7 +36,7 @@ def test_parallel_apply_action_against_pluribus_logs():
                 deck=deck,
                 sb=50,
                 bb=100,
-                stake=np.inf,
+                stake=float("inf"),
             )
             pkrs_states.append(pkrs_state)
 
