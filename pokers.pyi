@@ -5,8 +5,10 @@ from enum import Enum
 def visualize_state(state: State) -> str: ...
 def visualize_trace(trace: list[State]) -> str: ...
 
-# paralell.rs -----------------------------------------------------------------
-def parallel_act(states: list[State]) -> list[Optional[State]]: ...
+# parallel.rs -----------------------------------------------------------------
+def parallel_apply_action(
+    states: list[State], actions: list[Action]
+) -> list[State]: ...
 
 # state.rs --------------------------------------------------------------------
 
@@ -22,6 +24,7 @@ class State:
     pot: float
     min_bet: float
     final_state: bool
+    status: StateStatus
 
     @staticmethod
     def from_seed(
@@ -47,6 +50,12 @@ class PlayerState:
     stake: float
     reward: float
     active: bool
+
+class StateStatus(Enum):
+    Ok = 0
+    IllegalAction = 1
+    LowBet = 2
+    HighBet = 3
 
 # action.rs -------------------------------------------------------------------
 

@@ -41,6 +41,9 @@ pub struct State {
 
     #[pyo3(get, set)]
     pub final_state: bool,
+
+    #[pyo3(get, set)]
+    pub status: StateStatus,
 }
 
 #[pyclass]
@@ -68,4 +71,13 @@ pub struct PlayerState {
     pub active: bool,
 
     pub last_stage_action: Option<ActionEnum>,
+}
+
+#[pyclass]
+#[derive(Debug, Clone, Copy)]
+pub enum StateStatus {
+    Ok,
+    IllegalAction,
+    LowBet,
+    HighBet,
 }

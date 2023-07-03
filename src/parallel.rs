@@ -1,13 +1,10 @@
-use crate::game_logic::ActionError;
 use crate::state::action::Action;
 use crate::state::State;
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
-fn parallel_apply_action(
-    states: Vec<State>,
-    actions: Vec<Action>,
-) -> Vec<Result<State, ActionError>> {
+#[pyfunction]
+pub fn parallel_apply_action(states: Vec<State>, actions: Vec<Action>) -> Vec<State> {
     states
         .par_iter()
         .zip(actions)

@@ -7,7 +7,7 @@ use strum::IntoEnumIterator;
 use crate::state::action::{Action, ActionEnum, ActionRecord};
 use crate::state::card::{Card, CardRank, CardSuit};
 use crate::state::stage::Stage;
-use crate::state::{PlayerState, State};
+use crate::state::{PlayerState, State, StateStatus};
 
 #[derive(Debug)]
 pub enum ActionError {
@@ -88,23 +88,33 @@ impl State {
             final_state: false,
             pot: sb + bb,
             min_bet: bb,
+            status: StateStatus::Ok,
         };
 
         state.legal_actions = legal_actions(&state);
         state
     }
 
-    pub fn apply_action(&self, action: Action) -> Result<State, ActionError> {
+    pub fn apply_action(&self, action: Action) -> State {
+        match self.status {
+            StateStatus::Ok => (),
+            _ => return self.clone(),
+        }
+
         if self.final_state {
-            return Err(ActionError::IllegalAction);
+            return self.clone();
+        }
+
+        if !self.legal_actions.contains(&action.action) {
+            return State {
+                status: StateStatus::IllegalAction,
+                final_state: true,
+                ..self.clone()
+            };
         }
 
         let mut new_state = self.clone();
         let player = self.current_player as usize;
-
-        if !self.legal_actions.contains(&action.action) {
-            return Err(ActionError::IllegalAction);
-        }
 
         match action.action {
             ActionEnum::Fold => {
@@ -124,9 +134,17 @@ impl State {
 
             ActionEnum::Raise => {
                 if action.amount < self.min_bet - self.players_state[player].bet_chips {
-                    return Err(ActionError::LowBet);
+                    return State {
+                        status: StateStatus::LowBet,
+                        final_state: true,
+                        ..self.clone()
+                    };
                 } else if action.amount > self.players_state[player].stake {
-                    return Err(ActionError::HighBet);
+                    return State {
+                        status: StateStatus::HighBet,
+                        final_state: true,
+                        ..self.clone()
+                    };
                 }
                 new_state.players_state[player].bet_chips += action.amount;
                 new_state.players_state[player].stake -= action.amount;
@@ -202,7 +220,7 @@ impl State {
         }
 
         new_state.legal_actions = legal_actions(&new_state);
-        Ok(new_state)
+        new_state
     }
 
     fn set_winners(&mut self, winners: Vec<u64>) {

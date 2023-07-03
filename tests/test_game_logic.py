@@ -35,6 +35,7 @@ def test_game_logic_against_pluribus_logs():
             for pb_action in pb_actions:
                 print(pb_action)
                 assert not prev_state_final
+                assert pkrs_state.status == pkrs.StateStatus.Ok
                 assert pkrs_state.stage == pkrs.Stage.__dict__[pb_stage.capitalize()]
                 assert pkrs_state.current_player == pb_action["player"]
                 amount = pb_action.get("amount", 0)
