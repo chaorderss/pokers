@@ -37,10 +37,6 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: develop
-          target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter
-          sccache: 'true'
-          manylinux: auto
       - name: Test with pytest
         run: |
           pytest
@@ -77,10 +73,6 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: develop
-          target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter
-          sccache: 'true'
-          manylinux: auto
       - name: Test with pytest
         run: |
           pytest
@@ -114,10 +106,6 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: develop
-          target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter
-          sccache: 'true'
-          manylinux: auto
       - name: Test with pytest
         run: |
           pytest
