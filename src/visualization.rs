@@ -19,7 +19,7 @@ pub fn visualize_trace(trace: Vec<State>) -> String {
     let hands = trace[0]
         .players_state
         .iter()
-        .map(|ps| format!("|{0:?} {1:?}|", ps.hand.0, ps.hand.1))
+        .map(|ps| format!("|{0} {1}|", ps.hand.0, ps.hand.1))
         .fold("        ".to_owned(), |s1, s2| format!("{s1}   {s2}"));
 
     let vis = trace
@@ -41,7 +41,14 @@ pub fn visualize_state(state: &State) -> String {
             let pad = std::iter::repeat(" ")
                 .take(action_offset as usize)
                 .collect::<String>();
-            format!("{pad}↓ {:?}\n", action_record.action.action)
+            if action_record.action.amount == 0.0 {
+                format!("{pad}↓ {:?}\n", action_record.action.action)
+            } else {
+                format!(
+                    "{pad}↓ {:?}({})\n",
+                    action_record.action.action, action_record.action.amount
+                )
+            }
         }
     };
 
@@ -64,7 +71,7 @@ pub fn visualize_state(state: &State) -> String {
     let public_cards = state
         .public_cards
         .iter()
-        .fold("".to_owned(), |c1, c2| format!("{0:?} {1:?}", c1, c2));
+        .fold("".to_owned(), |c1, c2| format!("{0} {1}", c1, c2));
     format!(
         "{action}{0:<9?}:{players_bets}  {1:>4}    |{public_cards}|",
         state.stage, state.pot

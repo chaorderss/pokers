@@ -1,5 +1,6 @@
 use crate::game_logic::ActionError;
-use crate::state::{Action, State};
+use crate::state::action::Action;
+use crate::state::State;
 use pyo3::prelude::*;
 use rayon::prelude::*;
 

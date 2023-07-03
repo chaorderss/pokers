@@ -5,7 +5,7 @@ def main():
     n_players = int(input("Number of players: "))
     button = int(input("Button: "))
 
-    s = pkrs.State(n_players=n_players, button=button, seed=1234)
+    s = pkrs.State.from_settings(n_players=n_players, button=button, seed=1234)
     print(pkrs.visualize_trace([s]))
 
     while not s.final_state:
