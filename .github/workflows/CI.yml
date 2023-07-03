@@ -83,7 +83,7 @@ jobs:
           command: develop
       - name: Test with pytest
         run: |
-          .venv\Scripts\activate.bat
+          .venv\Scripts\Activate.ps1
           pytest
       - name: Build wheels
         uses: PyO3/maturin-action@v1
