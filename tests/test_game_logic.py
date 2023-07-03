@@ -51,3 +51,44 @@ def test_game_logic_against_pluribus_logs():
         print("Real rewards:", pb_hand["rewards"])
         for p, r in enumerate(pb_hand["rewards"]):
             assert pkrs_state.players_state[p].reward == r
+
+
+def test_initial_state():
+    for n_players in range(2, 7):
+        for button in range(0, n_players):
+            state = pkrs.State.from_seed(
+                n_players=n_players, button=button, sb=0.5, bb=1.0, stake=100, seed=1234
+            )
+            assert state.status == pkrs.StateStatus.Ok
+            assert state.current_player == (button + 3) % n_players
+            assert state.pot == 1.5
+            assert state.min_bet == 1.0
+
+            for ps in state.players_state:
+                assert ps.pot_chips == 0
+                assert ps.active
+                if ps.player == (button + 1) % n_players:
+                    assert ps.bet_chips == 0.5
+                    assert ps.stake == 99.5
+                elif ps.player == (button + 2) % n_players:
+                    assert ps.bet_chips == 1.0
+                    assert ps.stake == 99
+                else:
+                    assert ps.bet_chips == 0.0
+                    assert ps.stake == 100
+
+
+def test_illegal_actions():
+    state = pkrs.State.from_seed(
+        n_players=6, button=0, sb=0.5, bb=1.0, stake=100, seed=1234
+    )
+    assert state.status == pkrs.StateStatus.Ok
+
+    illegal_action_state = state.apply_action(pkrs.Action(pkrs.ActionEnum.Check))
+    assert illegal_action_state.status == pkrs.StateStatus.IllegalAction
+
+    low_bet_state = state.apply_action(pkrs.Action(pkrs.ActionEnum.Raise, amount=0.5))
+    assert low_bet_state.status == pkrs.StateStatus.LowBet
+
+    high_bet_state = state.apply_action(pkrs.Action(pkrs.ActionEnum.Raise, amount=101))
+    assert high_bet_state.status == pkrs.StateStatus.HighBet

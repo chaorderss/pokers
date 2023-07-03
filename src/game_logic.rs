@@ -55,14 +55,15 @@ impl State {
 
         let mut players_state: Vec<PlayerState> = Vec::new();
         for i in 0..n_players {
+            let player = (button + i + 1) % n_players;
             let chips = match i {
-                _ if i == (button + 1) % n_players => sb,
-                _ if i == (button + 2) % n_players => bb,
+                _ if player == (button + 1) % n_players => sb,
+                _ if player == (button + 2) % n_players => bb,
                 _ => 0.0,
             };
 
             let p_state = PlayerState {
-                player: (button + i + 1) % n_players,
+                player: player,
                 hand: (deck.remove(0), deck.remove(0)),
                 bet_chips: chips,
                 pot_chips: 0.0,

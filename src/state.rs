@@ -73,6 +73,13 @@ pub struct PlayerState {
     pub last_stage_action: Option<ActionEnum>,
 }
 
+#[pymethods]
+impl PlayerState {
+    pub fn __str__(&self) -> PyResult<String> {
+        Ok(format!("{:#?}", self))
+    }
+}
+
 #[pyclass]
 #[derive(Debug, Clone, Copy)]
 pub enum StateStatus {
