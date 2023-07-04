@@ -1,3 +1,6 @@
+#![allow(unused)]
+#[cfg(test)]
+use proptest_derive::Arbitrary;
 use pyo3::prelude::*;
 pub mod action;
 pub mod card;
@@ -8,6 +11,7 @@ use stage::Stage;
 
 #[pyclass]
 #[derive(Debug, Clone)]
+#[cfg_attr(test, derive(Arbitrary))]
 pub struct State {
     #[pyo3(get, set)]
     pub current_player: u64,
@@ -48,6 +52,7 @@ pub struct State {
 
 #[pyclass]
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(test, derive(Arbitrary))]
 pub struct PlayerState {
     #[pyo3(get, set)]
     pub player: u64,
@@ -82,6 +87,7 @@ impl PlayerState {
 
 #[pyclass]
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(test, derive(Arbitrary))]
 pub enum StateStatus {
     Ok,
     IllegalAction,

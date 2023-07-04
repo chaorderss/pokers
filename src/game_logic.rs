@@ -9,16 +9,13 @@ use crate::state::card::{Card, CardRank, CardSuit};
 use crate::state::stage::Stage;
 use crate::state::{PlayerState, State, StateStatus};
 
-#[derive(Debug)]
-pub enum ActionError {
-    IllegalAction,
-    LowBet,
-    HighBet,
+pub struct InitStateError {
+    msg: String,
 }
 
-impl std::convert::From<ActionError> for PyErr {
-    fn from(err: ActionError) -> PyErr {
-        PyOSError::new_err(format!("{:?}", err))
+impl std::convert::From<InitStateError> for PyErr {
+    fn from(err: InitStateError) -> PyErr {
+        PyOSError::new_err(err.msg)
     }
 }
 
@@ -32,7 +29,7 @@ impl State {
         bb: f64,
         stake: f64,
         seed: u64,
-    ) -> State {
+    ) -> Result<State, InitStateError> {
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
         let mut deck: Vec<Card> = Card::collect();
         deck.shuffle(&mut rng);
@@ -48,10 +45,42 @@ impl State {
         bb: f64,
         stake: f64,
         mut deck: Vec<Card>,
-    ) -> State {
-        assert!(n_players >= 2);
-        assert!(button < n_players);
-        assert!(deck.len() as u64 >= 2 * n_players);
+    ) -> Result<State, InitStateError> {
+        if n_players < 2 {
+            return Err(InitStateError {
+                msg: "The number of players must be 2 or more".to_owned(),
+            });
+        }
+
+        if button >= n_players {
+            return Err(InitStateError {
+                msg: "The button must be between the players".to_owned(),
+            });
+        }
+
+        if deck.len() < 2 * n_players as usize {
+            return Err(InitStateError {
+                msg: "The number of cards in the deck must be at least 2*n_players".to_owned(),
+            });
+        }
+
+        if sb < 0.0 {
+            return Err(InitStateError {
+                msg: "The small blind must be greater than 0".to_owned(),
+            });
+        }
+
+        if bb < sb {
+            return Err(InitStateError {
+                msg: "The small blind must be smaller or equal than the big blind".to_owned(),
+            });
+        }
+
+        if stake < bb {
+            return Err(InitStateError {
+                msg: "The stake must be greater or equal than the big blind".to_owned(),
+            });
+        }
 
         let mut players_state: Vec<PlayerState> = Vec::new();
         for i in 0..n_players {
@@ -93,7 +122,7 @@ impl State {
         };
 
         state.legal_actions = legal_actions(&state);
-        state
+        Ok(state)
     }
 
     pub fn apply_action(&self, action: Action) -> State {
@@ -298,7 +327,12 @@ fn legal_actions(state: &State) -> Vec<ActionEnum> {
     let mut illegal_actions: Vec<ActionEnum> = Vec::new();
     match state.stage {
         Stage::Showdown => illegal_actions.append(&mut ActionEnum::iter().collect()),
-        _ => {}
+        Stage::Preflop => {}
+        _ => (),
+    }
+
+    if state.final_state {
+        illegal_actions.append(&mut ActionEnum::iter().collect());
     }
 
     if state.min_bet == 0.0 {
@@ -426,4 +460,104 @@ fn high_card_value(ranks: &Vec<CardRank>) -> u64 {
         value += (13_u64.pow(i as u32)) * (12 - r as u64);
     }
     value
+}
+
+mod tests {
+    use super::*;
+    #[cfg(test)]
+    use proptest::prelude::*;
+
+    #[cfg(test)]
+    proptest! {
+        #[test]
+        fn from_deck_doesnt_crash(n_players in 0..10000, deck: Vec<Card>, sb in 0.5_f64..100.0_f64, bb_mult in 2..5, stake_mult in 100..1000, actions: Vec<Action>) {
+            let initial_state = State::from_deck(n_players as u64, 0, sb, sb * bb_mult as f64, sb * stake_mult as f64, deck);
+            match initial_state {
+                Ok(mut s) => {
+                    for a in actions {
+                        s = s.apply_action(a);
+                    }
+                },
+                Err(_) => return Ok(())
+            };
+
+        }
+
+        #[test]
+        fn zero_sum_game(n_players in 2..26, seed: u64, sb in 0.5_f64..100.0_f64, bb_mult in 2..5, stake_mult in 100..1000, actions in prop::collection::vec(Action::arbitrary_with(((), ())), 1..100)) {
+            let initial_state = State::from_seed(n_players as u64, 0, sb, sb * bb_mult as f64, sb * stake_mult as f64, seed);
+            match initial_state {
+                Ok(mut s) => {
+                    for a in actions {
+                        s = s.apply_action(a);
+                        if s.final_state {
+                            let sum_rewards = s.players_state.iter().map(|ps| ps.reward).fold(0_f64, |r1, r2| r1 + r2);
+                            prop_assert!(sum_rewards < 1e-12);
+                        }
+                    }
+                },
+                Err(err) => {
+                    println!("{}", err.msg);
+                    prop_assert!(false);
+                }
+            };
+        }
+
+        #[test]
+        fn call_and_check_no_legal_at_same_time(n_players in 2..26, sb in 0.5_f64..100.0_f64, bb_mult in 2..5, stake_mult in 100..1000, actions in prop::collection::vec(Action::arbitrary_with(((), ())), 1..100)) {
+            let initial_state = State::from_seed(n_players as u64, 0, sb, sb * bb_mult as f64, sb * stake_mult as f64, 1234);
+            match initial_state {
+                Ok(mut s) => {
+                    for a in actions {
+                        s = s.apply_action(a);
+                        if s.final_state {
+                            prop_assert!(!(s.legal_actions.contains(&ActionEnum::Check) && s.legal_actions.contains(&ActionEnum::Call)));
+                        }
+                    }
+                },
+                Err(err) => {
+                    println!("{}", err.msg);
+                    prop_assert!(false);
+                }
+            };
+        }
+
+        #[test]
+        fn illegal_raise_own_call(n_players in 2..26, sb in 0.5_f64..100.0_f64, bb_mult in 2..5, stake_mult in 100..1000, actions in prop::collection::vec(Action::arbitrary_with(((), ())), 1..100)) {
+            let initial_state = State::from_seed(n_players as u64, 0, sb, sb * bb_mult as f64, sb * stake_mult as f64, 1234);
+            match initial_state {
+                Ok(mut s) => {
+                    for a in actions {
+                        s = s.apply_action(a);
+                        let call_done = s.players_state[s.current_player as usize].last_stage_action == Some(ActionEnum::Call);
+                        let not_other_raise = !s.players_state.iter().filter(|ps| ps.active).any(|ps| ps.last_stage_action == Some(ActionEnum::Raise));
+                        if call_done && not_other_raise {
+                            prop_assert!(!s.legal_actions.contains(&ActionEnum::Raise));
+                        }
+                    }
+                },
+                Err(err) => {
+                    println!("{}", err.msg);
+                    prop_assert!(false);
+                }
+            };
+        }
+
+        #[test]
+        fn illegal_call_zero_bets(n_players in 2..26, sb in 0.5_f64..100.0_f64, bb_mult in 2..5, stake_mult in 100..1000, actions in prop::collection::vec(Action::arbitrary_with(((), ())), 1..100)) {
+            let initial_state = State::from_seed(n_players as u64, 0, sb, sb * bb_mult as f64, sb * stake_mult as f64, 1234);
+            match initial_state {
+                Ok(mut s) => {
+                    for a in actions {
+                        s = s.apply_action(a);
+                        prop_assert!(!(s.legal_actions.contains(&ActionEnum::Call) && s.min_bet == 0.0));
+                    }
+                },
+                Err(err) => {
+                    println!("{}", err.msg);
+                    prop_assert!(false);
+                }
+            };
+        }
+    }
 }

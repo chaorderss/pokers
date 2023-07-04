@@ -1,9 +1,13 @@
+#![allow(unused)]
+#[cfg(test)]
+use proptest_derive::Arbitrary;
 use pyo3::prelude::*;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
 #[pyclass]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(test, derive(Arbitrary))]
 pub struct Card {
     #[pyo3(get, set)]
     pub suit: CardSuit,
@@ -89,6 +93,7 @@ impl core::fmt::Display for Card {
 
 #[pyclass]
 #[derive(Debug, Clone, Copy, EnumIter, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(test, derive(Arbitrary))]
 pub enum CardSuit {
     Clubs,
     Diamonds,
@@ -98,6 +103,7 @@ pub enum CardSuit {
 
 #[pyclass]
 #[derive(Debug, Clone, Copy, EnumIter, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(test, derive(Arbitrary))]
 pub enum CardRank {
     R2,
     R3,

@@ -1,6 +1,6 @@
-# Pokers
-
 [![CI](https://github.com/Reinforcement-Poker/pokers/actions/workflows/CI.yml/badge.svg)](https://github.com/Reinforcement-Poker/pokers/actions/workflows/CI.yml)
+
+# Pokers
 
 Embarrassingly simple no limit texas holdem environment for RL.
 

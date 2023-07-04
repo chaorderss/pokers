@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b3da9bb2183857c7064be605a6dde110806878dafcb262ba3b4b5344ad193ab0 # shrinks to n_players = 0, seed = 0, sb = 0.5, bb_mult = 2, stake_mult = 100, actions = [Action { action: Fold, amount: 0.0 }]
+cc 297734a9898f11b09729690475c86a173c90acfa04d65c15eea85ebbc06f1f49 # shrinks to n_players = 27, seed = 0, sb = 0.5, bb_mult = 2, stake_mult = 100, actions = [Action { action: Fold, amount: -0.0 }]
+cc 61e2819ee09243f5a2b6b642ac81999ebd79511cadcaadbba6830f76ba7d7cef # shrinks to n_players = 4, seed = 0, sb = 0.5, bb_mult = 2, stake_mult = 100, actions = [Action { action: Fold, amount: 0.0 }, Action { action: Call, amount: 0.0 }, Action { action: Fold, amount: 0.0 }]
+cc f09281a07bc71a545a2af2406d90e889b10d1fad1bc1d45dab27496608df0232 # shrinks to n_players = 2, sb = 0.5, bb_mult = 2, stake_mult = 100, actions = [Action { action: Call, amount: 0.0 }, Action { action: Fold, amount: 0.0 }]
