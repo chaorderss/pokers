@@ -463,6 +463,7 @@ fn high_card_value(ranks: &Vec<CardRank>) -> u64 {
 }
 
 mod tests {
+    #[cfg(test)]
     use super::*;
     #[cfg(test)]
     use proptest::prelude::*;
