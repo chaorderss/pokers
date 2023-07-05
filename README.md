@@ -1,4 +1,5 @@
 [![CI](https://github.com/Reinforcement-Poker/pokers/actions/workflows/CI.yml/badge.svg)](https://github.com/Reinforcement-Poker/pokers/actions/workflows/CI.yml)
+[![PyPI version](https://badge.fury.io/py/pokers.svg)](https://badge.fury.io/py/pokers)
 
 # Pokers
 
