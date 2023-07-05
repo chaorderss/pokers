@@ -91,6 +91,5 @@ impl PlayerState {
 pub enum StateStatus {
     Ok,
     IllegalAction,
-    LowBet,
     HighBet,
 }

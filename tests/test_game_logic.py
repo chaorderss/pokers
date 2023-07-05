@@ -90,8 +90,5 @@ def test_illegal_actions():
     illegal_action_state = state.apply_action(pkrs.Action(pkrs.ActionEnum.Check))
     assert illegal_action_state.status == pkrs.StateStatus.IllegalAction
 
-    low_bet_state = state.apply_action(pkrs.Action(pkrs.ActionEnum.Raise, amount=0.5))
-    assert low_bet_state.status == pkrs.StateStatus.LowBet
-
     high_bet_state = state.apply_action(pkrs.Action(pkrs.ActionEnum.Raise, amount=101))
     assert high_bet_state.status == pkrs.StateStatus.HighBet

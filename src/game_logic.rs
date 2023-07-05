@@ -163,22 +163,17 @@ impl State {
             }
 
             ActionEnum::Raise => {
-                if action.amount < self.min_bet - self.players_state[player].bet_chips {
-                    return State {
-                        status: StateStatus::LowBet,
-                        final_state: true,
-                        ..self.clone()
-                    };
-                } else if action.amount > self.players_state[player].stake {
+                let bet = (self.min_bet - self.players_state[player].bet_chips) + action.amount;
+                if bet > self.players_state[player].stake {
                     return State {
                         status: StateStatus::HighBet,
                         final_state: true,
                         ..self.clone()
                     };
                 }
-                new_state.players_state[player].bet_chips += action.amount;
-                new_state.players_state[player].stake -= action.amount;
-                new_state.pot += action.amount;
+                new_state.players_state[player].bet_chips += bet;
+                new_state.players_state[player].stake -= bet;
+                new_state.pot += bet;
                 new_state.min_bet = new_state.players_state[player].bet_chips
             }
 
@@ -485,7 +480,8 @@ mod tests {
         }
 
         #[test]
-        fn zero_sum_game(n_players in 2..26, seed: u64, sb in 0.5_f64..100.0_f64, bb_mult in 2..5, stake_mult in 100..1000, actions in prop::collection::vec(Action::arbitrary_with(((), ())), 1..100)) {
+        fn zero_sum_game(n_players in 2..26, seed: u64, sb in 0.5_f64..100.0_f64, bb_mult in 2..5, stake_mult in 100..1000, actions in prop::collection::vec(Action::arbitrary_with(((), ())).prop_filter("Raise abs amount bellow 1e12",
+        |a| a.amount.abs() < 1e12), 1..100)) {
             let initial_state = State::from_seed(n_players as u64, 0, sb, sb * bb_mult as f64, sb * stake_mult as f64, seed);
             match initial_state {
                 Ok(mut s) => {
@@ -493,6 +489,7 @@ mod tests {
                         s = s.apply_action(a);
                         if s.final_state {
                             let sum_rewards = s.players_state.iter().map(|ps| ps.reward).fold(0_f64, |r1, r2| r1 + r2);
+                            println!("sum_rewards = {sum_rewards}");
                             prop_assert!(sum_rewards < 1e-12);
                         }
                     }

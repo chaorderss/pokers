@@ -48,7 +48,7 @@ print(pkrs.visualize_trace(trace))
 
 ### Error handling
 
-There are three possible types of erroneous states: when an illegal action is performed, when a player bets less than the minimum and when a player bets more chips than he has. These cases are represented by the enum `StateStatus` with the values `IllegalAction`, `LowBet` and `HighBet`, the value `Ok` is used for correct states. This information is stored in the field `status` of the state so you can filter them.
+There are two possible types of erroneous states: when an illegal action is performed and when a player bets more chips than he has available. These cases are represented by the enum `StateStatus` with the values `IllegalAction` and `HighBet`, the value `Ok` is used for correct states. This information is stored in the field `status` of the state so you can filter them.
 
 Every erroneous state is also final. So applying an action over it will return the same exact state.
 
