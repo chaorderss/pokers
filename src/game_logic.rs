@@ -135,15 +135,22 @@ impl State {
             return self.clone();
         }
 
+        let mut new_state = self.clone();
+        new_state.from_action = Some(ActionRecord {
+            player: self.current_player,
+            action: action,
+            stage: self.stage,
+            legal_actions: self.legal_actions.clone(),
+        });
+
         if !self.legal_actions.contains(&action.action) {
             return State {
                 status: StateStatus::IllegalAction,
                 final_state: true,
-                ..self.clone()
+                ..new_state
             };
         }
 
-        let mut new_state = self.clone();
         let player = self.current_player as usize;
 
         match action.action {
@@ -168,7 +175,7 @@ impl State {
                     return State {
                         status: StateStatus::HighBet,
                         final_state: true,
-                        ..self.clone()
+                        ..new_state
                     };
                 }
                 new_state.players_state[player].bet_chips += bet;
@@ -179,13 +186,6 @@ impl State {
 
             ActionEnum::Check => (),
         };
-
-        new_state.from_action = Some(ActionRecord {
-            player: self.current_player,
-            action: action,
-            stage: self.stage,
-            legal_actions: self.legal_actions.clone(),
-        });
 
         new_state.players_state[player].last_stage_action = Some(action.action);
 
@@ -549,6 +549,23 @@ mod tests {
                     for a in actions {
                         s = s.apply_action(a);
                         prop_assert!(!(s.legal_actions.contains(&ActionEnum::Call) && s.min_bet == 0.0));
+                    }
+                },
+                Err(err) => {
+                    println!("{}", err.msg);
+                    prop_assert!(false);
+                }
+            };
+        }
+
+        #[test]
+        fn from_action_not_none(n_players in 2..26, sb in 0.5_f64..100.0_f64, bb_mult in 2..5, stake_mult in 100..1000, actions in prop::collection::vec(Action::arbitrary_with(((), ())), 1..100)) {
+            let initial_state = State::from_seed(n_players as u64, 0, sb, sb * bb_mult as f64, sb * stake_mult as f64, 1234);
+            match initial_state {
+                Ok(mut s) => {
+                    for a in actions {
+                        s = s.apply_action(a);
+                        prop_assert!(s.from_action != None);
                     }
                 },
                 Err(err) => {

@@ -58,6 +58,8 @@ class StateStatus(Enum):
     LowBet = 2
     HighBet = 3
 
+    def __int__(self): ...
+
 # action.rs -------------------------------------------------------------------
 
 class ActionRecord:
@@ -71,6 +73,8 @@ class ActionEnum(Enum):
     Check = 1
     Call = 2
     Raise = 3
+
+    def __int__(self): ...
 
 class Action:
     action: ActionEnum
@@ -92,6 +96,8 @@ class CardSuit(Enum):
     Hearts = 2
     Spades = 3
 
+    def __int__(self): ...
+
 class CardRank(Enum):
     R2 = 0
     R3 = 1
@@ -107,6 +113,8 @@ class CardRank(Enum):
     RK = 11
     RA = 12
 
+    def __int__(self): ...
+
 # stage.rs --------------------------------------------------------------------
 
 class Stage(Enum):
@@ -115,3 +123,5 @@ class Stage(Enum):
     Turn = 2
     River = 3
     Showdown = 4
+
+    def __int__(self): ...

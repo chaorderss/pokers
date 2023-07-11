@@ -39,7 +39,7 @@ pub enum ActionEnum {
 }
 
 #[pyclass]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(test, derive(Arbitrary))]
 pub struct ActionRecord {
     #[pyo3(get, set)]
