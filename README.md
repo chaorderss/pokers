@@ -7,7 +7,7 @@ Embarrassingly simple no limit texas holdem environment for RL.
 
 ## Why another poker environment?
 
-Poker is a incredibly deep game with very simple rules, so why are all the environments so overly complex? Heck, someone could say that you need to publish a paper before building one (looking at you RLCard 👀). Pokers way is to discard the agent environment cycle and all that stuff, just the good old new_state = state + action model. Through its simplicity pokers tries to be flexible and easily integrable into any framework.
+Poker is an incredibly deep game with very simple rules, so why are all the environments so overly complex? Heck, someone could say that you need to publish a paper before building one (looking at you RLCard 👀). Pokers way is to discard the agent environment cycle and all that stuff, just the good old new_state = state + action model. Through its simplicity pokers tries to be flexible and easily integrable into any framework.
 
 ### Why not to use pokers
 
