@@ -1,3 +1,4 @@
+// game_logic.rs
 use itertools::Itertools;
 use pyo3::exceptions::PyOSError;
 use pyo3::prelude::*;
@@ -8,6 +9,15 @@ use crate::state::action::{Action, ActionEnum, ActionRecord};
 use crate::state::card::{Card, CardRank, CardSuit};
 use crate::state::stage::Stage;
 use crate::state::{PlayerState, State, StateStatus};
+
+// Define a macro for verbose printing
+macro_rules! verbose_println {
+    ($state:expr, $($arg:tt)*) => {
+        if $state.verbose {
+            println!($($arg)*);
+        }
+    };
+}
 
 pub struct InitStateError {
     msg: String,
@@ -22,6 +32,7 @@ impl std::convert::From<InitStateError> for PyErr {
 #[pymethods]
 impl State {
     #[staticmethod]
+    #[pyo3(signature = (n_players, button, sb, bb, stake, seed, verbose=false))]
     pub fn from_seed(
         n_players: u64,
         button: u64,
@@ -29,15 +40,17 @@ impl State {
         bb: f64,
         stake: f64,
         seed: u64,
+        verbose: bool,
     ) -> Result<State, InitStateError> {
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
         let mut deck: Vec<Card> = Card::collect();
         deck.shuffle(&mut rng);
 
-        State::from_deck(n_players, button, sb, bb, stake, deck)
+        State::from_deck(n_players, button, sb, bb, stake, deck, verbose)
     }
 
     #[staticmethod]
+    #[pyo3(signature = (n_players, button, sb, bb, stake, deck, verbose=false))]
     pub fn from_deck(
         n_players: u64,
         button: u64,
@@ -45,6 +58,7 @@ impl State {
         bb: f64,
         stake: f64,
         mut deck: Vec<Card>,
+        verbose: bool,
     ) -> Result<State, InitStateError> {
         if n_players < 2 {
             return Err(InitStateError {
@@ -119,6 +133,7 @@ impl State {
             pot: sb + bb,
             min_bet: bb,
             status: StateStatus::Ok,
+            verbose: verbose,
         };
 
         state.legal_actions = legal_actions(&state);
@@ -225,17 +240,23 @@ impl State {
         if new_state.stage == Stage::Showdown {
             let ranks: Vec<(u64, u64, u64)> = active_players
                 .iter()
-                .map(|ps| rank_hand(ps.hand, &new_state.public_cards))
+                .map(|ps| rank_hand(&new_state, ps.hand, &new_state.public_cards))
                 .collect();
             let min_rank = ranks.iter().copied().min().unwrap();
-            println!("Ranks: {:?}", ranks);
+            
+            // Use verbose_println! macro instead of println!
+            verbose_println!(&new_state, "Ranks: {:?}", ranks);
+            
             let winners_indices: Vec<usize> = ranks
                 .iter()
                 .enumerate()
                 .filter(|(_, &r)| r == min_rank)
                 .map(|(i, _)| i)
                 .collect();
-            println!("Winner id: {:?}", winners_indices);
+                
+            // Use verbose_println! macro instead of println!    
+            verbose_println!(&new_state, "Winner id: {:?}", winners_indices);
+            
             new_state.set_winners(
                 winners_indices
                     .iter()
@@ -344,7 +365,8 @@ fn legal_actions(state: &State) -> Vec<ActionEnum> {
     legal_actions
 }
 
-fn rank_hand(private_cards: (Card, Card), public_cards: &Vec<Card>) -> (u64, u64, u64) {
+// Modified to accept state parameter for verbose control
+fn rank_hand(state: &State, private_cards: (Card, Card), public_cards: &Vec<Card>) -> (u64, u64, u64) {
     let mut cards = public_cards.clone();
     cards.append(&mut vec![private_cards.0, private_cards.1]);
 
@@ -467,7 +489,7 @@ mod tests {
     proptest! {
         #[test]
         fn from_deck_doesnt_crash(n_players in 0..10000, deck: Vec<Card>, sb in 0.5_f64..100.0_f64, bb_mult in 2..5, stake_mult in 100..1000, actions: Vec<Action>) {
-            let initial_state = State::from_deck(n_players as u64, 0, sb, sb * bb_mult as f64, sb * stake_mult as f64, deck);
+            let initial_state = State::from_deck(n_players as u64, 0, sb, sb * bb_mult as f64, sb * stake_mult as f64, deck, false);
             match initial_state {
                 Ok(mut s) => {
                     for a in actions {
@@ -482,7 +504,7 @@ mod tests {
         #[test]
         fn zero_sum_game(n_players in 2..26, seed: u64, sb in 0.5_f64..100.0_f64, bb_mult in 2..5, stake_mult in 100..1000, actions in prop::collection::vec(Action::arbitrary_with(((), ())).prop_filter("Raise abs amount bellow 1e12",
         |a| a.amount.abs() < 1e12), 1..100)) {
-            let initial_state = State::from_seed(n_players as u64, 0, sb, sb * bb_mult as f64, sb * stake_mult as f64, seed);
+            let initial_state = State::from_seed(n_players as u64, 0, sb, sb * bb_mult as f64, sb * stake_mult as f64, seed, false);
             match initial_state {
                 Ok(mut s) => {
                     for a in actions {
@@ -503,7 +525,7 @@ mod tests {
 
         #[test]
         fn call_and_check_no_legal_at_same_time(n_players in 2..26, sb in 0.5_f64..100.0_f64, bb_mult in 2..5, stake_mult in 100..1000, actions in prop::collection::vec(Action::arbitrary_with(((), ())), 1..100)) {
-            let initial_state = State::from_seed(n_players as u64, 0, sb, sb * bb_mult as f64, sb * stake_mult as f64, 1234);
+            let initial_state = State::from_seed(n_players as u64, 0, sb, sb * bb_mult as f64, sb * stake_mult as f64, 1234, false);
             match initial_state {
                 Ok(mut s) => {
                     for a in actions {
@@ -522,7 +544,7 @@ mod tests {
 
         #[test]
         fn illegal_raise_own_call(n_players in 2..26, sb in 0.5_f64..100.0_f64, bb_mult in 2..5, stake_mult in 100..1000, actions in prop::collection::vec(Action::arbitrary_with(((), ())), 1..100)) {
-            let initial_state = State::from_seed(n_players as u64, 0, sb, sb * bb_mult as f64, sb * stake_mult as f64, 1234);
+            let initial_state = State::from_seed(n_players as u64, 0, sb, sb * bb_mult as f64, sb * stake_mult as f64, 1234, false);
             match initial_state {
                 Ok(mut s) => {
                     for a in actions {
@@ -543,7 +565,7 @@ mod tests {
 
         #[test]
         fn illegal_call_zero_bets(n_players in 2..26, sb in 0.5_f64..100.0_f64, bb_mult in 2..5, stake_mult in 100..1000, actions in prop::collection::vec(Action::arbitrary_with(((), ())), 1..100)) {
-            let initial_state = State::from_seed(n_players as u64, 0, sb, sb * bb_mult as f64, sb * stake_mult as f64, 1234);
+            let initial_state = State::from_seed(n_players as u64, 0, sb, sb * bb_mult as f64, sb * stake_mult as f64, 1234, false);
             match initial_state {
                 Ok(mut s) => {
                     for a in actions {
@@ -560,7 +582,7 @@ mod tests {
 
         #[test]
         fn from_action_not_none(n_players in 2..26, sb in 0.5_f64..100.0_f64, bb_mult in 2..5, stake_mult in 100..1000, actions in prop::collection::vec(Action::arbitrary_with(((), ())), 1..100)) {
-            let initial_state = State::from_seed(n_players as u64, 0, sb, sb * bb_mult as f64, sb * stake_mult as f64, 1234);
+            let initial_state = State::from_seed(n_players as u64, 0, sb, sb * bb_mult as f64, sb * stake_mult as f64, 1234, false);
             match initial_state {
                 Ok(mut s) => {
                     for a in actions {

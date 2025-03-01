@@ -25,10 +25,11 @@ class State:
     min_bet: float
     final_state: bool
     status: StateStatus
+    verbose: bool  # New field for verbosity control
 
     @staticmethod
     def from_seed(
-        n_players: int, button: int, sb: float, bb: float, stake: float, seed: int
+        n_players: int, button: int, sb: float, bb: float, stake: float, seed: int, verbose: bool = False
     ) -> State: ...
     @staticmethod
     def from_deck(
@@ -38,6 +39,7 @@ class State:
         bb: float,
         stake: float,
         deck: list[Card],
+        verbose: bool = False,
     ) -> State: ...
     def apply_action(self, action: Action) -> State: ...
     def __str__(self) -> str: ...

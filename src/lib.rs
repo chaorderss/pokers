@@ -1,3 +1,4 @@
+// lib.rs
 use pyo3::prelude::*;
 mod game_logic;
 mod parallel;
