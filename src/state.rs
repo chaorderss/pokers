@@ -48,6 +48,9 @@ pub struct State {
 
     #[pyo3(get, set)]
     pub status: StateStatus,
+    
+    #[pyo3(get, set)]
+    pub verbose: bool,
 }
 
 #[pyclass]
