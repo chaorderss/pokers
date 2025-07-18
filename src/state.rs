@@ -32,6 +32,9 @@ pub struct State {
     pub from_action: Option<ActionRecord>,
 
     #[pyo3(get, set)]
+    pub action_list: Vec<ActionRecord>,
+
+    #[pyo3(get, set)]
     pub legal_actions: Vec<ActionEnum>,
 
     #[pyo3(get, set)]
@@ -48,7 +51,7 @@ pub struct State {
 
     #[pyo3(get, set)]
     pub status: StateStatus,
-    
+
     #[pyo3(get, set)]
     pub verbose: bool,
 }

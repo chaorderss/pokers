@@ -10,10 +10,10 @@ use crate::state::card::{Card, CardRank, CardSuit};
 use crate::state::stage::Stage;
 use crate::state::{PlayerState, State, StateStatus};
 
-// Define a macro for verbose printing
+// Define a macro for verbose printing controlled by environment variable
 macro_rules! verbose_println {
     ($state:expr, $($arg:tt)*) => {
-        if $state.verbose {
+        if $state.verbose && std::env::var("POKERS_VERBOSE").is_ok() {
             println!($($arg)*);
         }
     };
@@ -127,6 +127,7 @@ impl State {
             stage: Stage::Preflop,
             button: button,
             from_action: None,
+            action_list: Vec::new(),
             legal_actions: Vec::new(),
             deck: deck,
             final_state: false,
@@ -151,12 +152,14 @@ impl State {
         }
 
         let mut new_state = self.clone();
-        new_state.from_action = Some(ActionRecord {
+        let action_record = ActionRecord {
             player: self.current_player,
             action: action,
             stage: self.stage,
             legal_actions: self.legal_actions.clone(),
-        });
+        };
+        new_state.from_action = Some(action_record.clone());
+        new_state.action_list.push(action_record);
 
         if !self.legal_actions.contains(&action.action) {
             return State {
@@ -178,25 +181,36 @@ impl State {
             }
 
             ActionEnum::Call => {
-                let raised_chips = self.min_bet - self.players_state[player].bet_chips;
-                new_state.players_state[player].bet_chips += raised_chips;
-                new_state.players_state[player].stake -= raised_chips;
-                new_state.pot += raised_chips;
+                let required_chips = self.min_bet - self.players_state[player].bet_chips;
+                let actual_chips = if required_chips > self.players_state[player].stake {
+                    // Player doesn't have enough chips to call - go all-in instead
+                    self.players_state[player].stake
+                } else {
+                    required_chips
+                };
+
+                new_state.players_state[player].bet_chips += actual_chips;
+                new_state.players_state[player].stake -= actual_chips;
+                new_state.pot += actual_chips;
             }
 
             ActionEnum::Raise => {
                 let bet = (self.min_bet - self.players_state[player].bet_chips) + action.amount;
-                if bet > self.players_state[player].stake {
-                    return State {
-                        status: StateStatus::HighBet,
-                        final_state: true,
-                        ..new_state
-                    };
+                let actual_bet = if bet > self.players_state[player].stake {
+                    // Player wants to bet more than they have - go all-in instead
+                    self.players_state[player].stake
+                } else {
+                    bet
+                };
+
+                new_state.players_state[player].bet_chips += actual_bet;
+                new_state.players_state[player].stake -= actual_bet;
+                new_state.pot += actual_bet;
+
+                // Update min_bet only if this player's bet is higher than current min_bet
+                if new_state.players_state[player].bet_chips > new_state.min_bet {
+                    new_state.min_bet = new_state.players_state[player].bet_chips;
                 }
-                new_state.players_state[player].bet_chips += bet;
-                new_state.players_state[player].stake -= bet;
-                new_state.pot += bet;
-                new_state.min_bet = new_state.players_state[player].bet_chips
             }
 
             ActionEnum::Check => (),
@@ -219,20 +233,40 @@ impl State {
             .filter(|ps| ps.active)
             .collect();
         let multiple_active = active_players.len() >= 2;
+
         // Every active player has done an action
         let is_last_player = active_players.iter().all(|ps| ps.last_stage_action != None);
-        // And every active player has bet the same amount
-        let all_same_bet = active_players
-            .iter()
-            .all(|ps| ps.bet_chips == new_state.min_bet);
 
-        let round_ended = multiple_active && is_last_player && all_same_bet;
+        // Check if betting is complete: either all players have bet the same amount,
+        // or all non-all-in players have bet the same amount and all-in players can't bet more
+        let max_bet = active_players
+            .iter()
+            .map(|ps| ps.bet_chips)
+            .fold(0.0f64, f64::max);
+        let betting_complete = active_players.iter().all(|ps| {
+            // Player has matched the max bet OR is all-in and can't bet more
+            ps.bet_chips == max_bet || (ps.stake == 0.0 && ps.bet_chips > 0.0)
+        });
+
+        let round_ended = multiple_active && is_last_player && betting_complete;
 
         if round_ended {
             new_state.to_next_stage();
         }
 
-        // The game ends if the players have reached the showdown or every player except one has folded
+        // Check if only one player has remaining chips (others are all-in)
+        let players_with_chips = active_players.iter().filter(|ps| ps.stake > 0.0).count();
+        let should_go_to_showdown =
+            active_players.len() > 1 && players_with_chips <= 1 && is_last_player;
+
+        // If only one player has chips left, skip to showdown
+        if should_go_to_showdown && new_state.stage != Stage::Showdown {
+            while new_state.stage != Stage::Showdown {
+                new_state.to_next_stage();
+            }
+        }
+
+        // The game ends if every player except one has folded
         if active_players.len() == 1 {
             new_state.set_winners(vec![active_players[0].player]);
         }
@@ -243,20 +277,20 @@ impl State {
                 .map(|ps| rank_hand(&new_state, ps.hand, &new_state.public_cards))
                 .collect();
             let min_rank = ranks.iter().copied().min().unwrap();
-            
+
             // Use verbose_println! macro instead of println!
             verbose_println!(&new_state, "Ranks: {:?}", ranks);
-            
+
             let winners_indices: Vec<usize> = ranks
                 .iter()
                 .enumerate()
                 .filter(|(_, &r)| r == min_rank)
                 .map(|(i, _)| i)
                 .collect();
-                
-            // Use verbose_println! macro instead of println!    
+
+            // Use verbose_println! macro instead of println!
             verbose_println!(&new_state, "Winner id: {:?}", winners_indices);
-            
+
             new_state.set_winners(
                 winners_indices
                     .iter()
@@ -351,12 +385,30 @@ fn legal_actions(state: &State) -> Vec<ActionEnum> {
         illegal_actions.append(&mut ActionEnum::iter().collect());
     }
 
+    // Check if current player is all-in (no remaining stake)
+    let current_player_state = &state.players_state[state.current_player as usize];
+    let is_all_in = current_player_state.stake == 0.0;
+
     if state.min_bet == 0.0 {
         illegal_actions.push(ActionEnum::Call);
     }
 
     if state.min_bet != 0.0 {
         illegal_actions.push(ActionEnum::Check);
+    }
+
+    // If player is all-in, they can only fold or check (if no bet to call)
+    if is_all_in {
+        if state.min_bet > current_player_state.bet_chips {
+            // There's a bet to call but player is all-in, only fold is allowed
+            illegal_actions.push(ActionEnum::Call);
+            illegal_actions.push(ActionEnum::Raise);
+            illegal_actions.push(ActionEnum::Check);
+        } else {
+            // No bet to call or player has already matched, only check is allowed
+            illegal_actions.push(ActionEnum::Call);
+            illegal_actions.push(ActionEnum::Raise);
+        }
     }
 
     let legal_actions: Vec<ActionEnum> = ActionEnum::iter()
@@ -366,7 +418,11 @@ fn legal_actions(state: &State) -> Vec<ActionEnum> {
 }
 
 // Modified to accept state parameter for verbose control
-fn rank_hand(state: &State, private_cards: (Card, Card), public_cards: &Vec<Card>) -> (u64, u64, u64) {
+fn rank_hand(
+    _state: &State,
+    private_cards: (Card, Card),
+    public_cards: &Vec<Card>,
+) -> (u64, u64, u64) {
     let mut cards = public_cards.clone();
     cards.append(&mut vec![private_cards.0, private_cards.1]);
 
