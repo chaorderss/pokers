@@ -113,6 +113,7 @@ impl State {
                 stake: stake - chips,
                 reward: 0.0,
                 active: true,
+                range_idx: -1, // Will be calculated later
                 last_stage_action: None,
             };
             players_state.push(p_state);
@@ -136,6 +137,9 @@ impl State {
             status: StateStatus::Ok,
             verbose: verbose,
         };
+
+        // Update range indices for all players
+        state.update_range_indices();
 
         state.legal_actions = legal_actions(&state);
         Ok(state)
@@ -365,6 +369,9 @@ impl State {
         while !self.players_state[self.current_player as usize].active {
             self.current_player = (self.current_player + 1) % self.players_state.len() as u64;
         }
+
+        // Update range indices after stage change (important for postflop calculation)
+        self.update_range_indices();
     }
 
     pub fn __str__(&self) -> PyResult<String> {
