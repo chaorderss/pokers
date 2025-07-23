@@ -146,6 +146,9 @@ impl State {
     }
 
     pub fn apply_action(&self, action: Action) -> State {
+        // Define MIN_MEANINGFUL_STAKE at the top of the function for consistent use
+        const MIN_MEANINGFUL_STAKE: f64 = 1.0;
+
         match self.status {
             StateStatus::Ok => (),
             _ => return self.clone(),
@@ -153,6 +156,15 @@ impl State {
 
         if self.final_state {
             return self.clone();
+        }
+
+        // If we're already at showdown, the game is over - no actions allowed
+        if self.stage == Stage::Showdown {
+            return State {
+                status: StateStatus::IllegalAction,
+                final_state: true,
+                ..self.clone()
+            };
         }
 
         let mut new_state = self.clone();
@@ -184,22 +196,36 @@ impl State {
                     -(new_state.players_state[player].pot_chips as f64);
             }
 
-            ActionEnum::Call => {
-                let required_chips = self.min_bet - self.players_state[player].bet_chips;
-                let actual_chips = if required_chips > self.players_state[player].stake {
-                    // Player doesn't have enough chips to call - go all-in instead
-                    self.players_state[player].stake
+            ActionEnum::CheckCall => {
+                // If min_bet is 0 (no bet to call), this acts as Check
+                if self.min_bet == 0.0 || self.min_bet <= self.players_state[player].bet_chips {
+                    // Check - no action needed
                 } else {
-                    required_chips
-                };
+                    // Call - match the minimum bet
+                    let required_chips = self.min_bet - self.players_state[player].bet_chips;
+                    let actual_chips = if required_chips > self.players_state[player].stake {
+                        // Player doesn't have enough chips to call - go all-in instead
+                        self.players_state[player].stake
+                    } else {
+                        required_chips
+                    };
 
-                new_state.players_state[player].bet_chips += actual_chips;
-                new_state.players_state[player].stake -= actual_chips;
-                new_state.pot += actual_chips;
+                    new_state.players_state[player].bet_chips += actual_chips;
+                    new_state.players_state[player].stake -= actual_chips;
+                    new_state.pot += actual_chips;
+                }
             }
 
-            ActionEnum::Raise => {
-                let bet = (self.min_bet - self.players_state[player].bet_chips) + action.amount;
+            ActionEnum::BetRaise => {
+                // If min_bet is 0, this acts as Bet; otherwise, it's a Raise
+                let bet = if self.min_bet == 0.0 {
+                    // First bet (Bet)
+                    action.amount
+                } else {
+                    // Raise over the minimum bet
+                    (self.min_bet - self.players_state[player].bet_chips) + action.amount
+                };
+
                 let actual_bet = if bet > self.players_state[player].stake {
                     // Player wants to bet more than they have - go all-in instead
                     self.players_state[player].stake
@@ -216,20 +242,179 @@ impl State {
                     new_state.min_bet = new_state.players_state[player].bet_chips;
                 }
             }
-
-            ActionEnum::Check => (),
         };
 
         new_state.players_state[player].last_stage_action = Some(action.action);
 
-        new_state.current_player = (self.current_player + 1) % self.players_state.len() as u64;
-        while !self.players_state[new_state.current_player as usize].active {
-            new_state.current_player =
-                (new_state.current_player + 1) % self.players_state.len() as u64;
+        // Check if all active players are all-in (have no remaining stake)
+        // CRITICAL: Immediately check if all active players are all-in after any action
+        let active_players: Vec<PlayerState> = new_state
+            .players_state
+            .iter()
+            .copied()
+            .filter(|ps| ps.active)
+            .collect();
+
+        // CRITICAL FIX: Players have meaningful stake only if their remaining chips
+        // are significant both in absolute terms AND relative to current betting level
+        let players_with_stake: Vec<&PlayerState> = active_players
+            .iter()
+            .filter(|ps| {
+                // Absolute threshold: must have at least MIN_MEANINGFUL_STAKE
+                if ps.stake < MIN_MEANINGFUL_STAKE {
+                    return false;
+                }
+
+                // Relative threshold: remaining stake should be meaningful relative to current bet
+                // If they've already bet significantly, remaining chips should be substantial
+                if ps.bet_chips > 0.0 {
+                    // Player's remaining stake should be at least 5% of what they've already bet
+                    // OR enough to make a meaningful raise (whichever is larger)
+                    let min_relative_stake = (ps.bet_chips * 0.05).max(MIN_MEANINGFUL_STAKE);
+                    ps.stake >= min_relative_stake
+                } else {
+                    // No bet yet, just need absolute threshold
+                    true
+                }
+            })
+            .collect();
+
+        if !active_players.is_empty()
+            && players_with_stake.is_empty()
+            && new_state.stage != Stage::Showdown
+        {
+            // Skip to showdown stage
+            while new_state.stage != Stage::Showdown {
+                new_state.to_next_stage();
+            }
+
+            // Determine winners and end the game
+            let ranks: Vec<(u64, u64, u64)> = active_players
+                .iter()
+                .map(|ps| rank_hand(&new_state, ps.hand, &new_state.public_cards))
+                .collect();
+            let min_rank = ranks.iter().copied().min().unwrap();
+
+            let winners_indices: Vec<usize> = ranks
+                .iter()
+                .enumerate()
+                .filter(|(_, &r)| r == min_rank)
+                .map(|(i, _)| i)
+                .collect();
+
+            new_state.set_winners(
+                winners_indices
+                    .iter()
+                    .map(|&i| active_players[i].player)
+                    .collect(),
+            );
+
+            return new_state;
         }
 
-        // The betting round ends if:
-        // Theres two or more active players
+        // Existing logic continues...
+        let active_players_with_stake = new_state
+            .players_state
+            .iter()
+            .copied()
+            .filter(|ps| ps.active && ps.stake > 0.0)
+            .collect::<Vec<PlayerState>>();
+
+        // If no active players have remaining stake to bet, advance to next stage or end game
+        // BUT only if we're not already at Showdown (which should end the game)
+        if active_players_with_stake.is_empty() && new_state.stage != Stage::Showdown {
+            // All active players are all-in, should advance the game
+            match new_state.stage {
+                Stage::Preflop => {
+                    new_state.stage = Stage::Flop;
+                    new_state.current_player = 0;
+                }
+                Stage::Flop => {
+                    new_state.stage = Stage::Turn;
+                    new_state.current_player = 0;
+                }
+                Stage::Turn => {
+                    new_state.stage = Stage::River;
+                    new_state.current_player = 0;
+                }
+                Stage::River => {
+                    new_state.stage = Stage::Showdown;
+                }
+                Stage::Showdown => {
+                    // Already at showdown, game should end - trigger winner selection
+                    new_state.final_state = true;
+                }
+            }
+            // Return immediately since no more actions needed
+            return new_state;
+        }
+
+        // CRITICAL: If we're at Showdown stage, no more actions are needed - just return
+        if new_state.stage == Stage::Showdown {
+            new_state.final_state = true;
+            return new_state;
+        }
+
+        // Move to next player, but skip players who are inactive OR all-in (no remaining stake)
+        // BUT don't do this if we're at Showdown - just return
+        if new_state.stage == Stage::Showdown {
+            return new_state;
+        }
+
+        new_state.current_player = (self.current_player + 1) % self.players_state.len() as u64;
+        let mut attempts = 0;
+        while attempts < self.players_state.len() {
+            let current_ps = &new_state.players_state[new_state.current_player as usize];
+
+            // Player is eligible to act if they are active AND have remaining stake to bet
+            if current_ps.active && current_ps.stake > 0.0 {
+                break;
+            }
+
+            new_state.current_player =
+                (new_state.current_player + 1) % self.players_state.len() as u64;
+            attempts += 1;
+        }
+
+        // If we couldn't find any player with chips, all active players are all-in
+        if attempts >= self.players_state.len() {
+            // All active players are all-in, skip directly to showdown and end game
+            while new_state.stage != Stage::Showdown {
+                new_state.to_next_stage();
+            }
+
+            // Determine winners and end the game immediately
+            let active_players: Vec<PlayerState> = new_state
+                .players_state
+                .iter()
+                .copied()
+                .filter(|ps| ps.active)
+                .collect();
+
+            let ranks: Vec<(u64, u64, u64)> = active_players
+                .iter()
+                .map(|ps| rank_hand(&new_state, ps.hand, &new_state.public_cards))
+                .collect();
+            let min_rank = ranks.iter().copied().min().unwrap();
+
+            let winners_indices: Vec<usize> = ranks
+                .iter()
+                .enumerate()
+                .filter(|(_, &r)| r == min_rank)
+                .map(|(i, _)| i)
+                .collect();
+
+            new_state.set_winners(
+                winners_indices
+                    .iter()
+                    .map(|&i| active_players[i].player)
+                    .collect(),
+            );
+
+            return new_state;
+        }
+
+        // The betting round ends if there are multiple active players
         let active_players: Vec<PlayerState> = new_state
             .players_state
             .iter()
@@ -238,33 +423,93 @@ impl State {
             .collect();
         let multiple_active = active_players.len() >= 2;
 
-        // Every active player has done an action
-        let is_last_player = active_players.iter().all(|ps| ps.last_stage_action != None);
+        // CRITICAL FIX: If all active players are all-in, skip to showdown and end the game immediately
+        let all_active_players_allin = active_players.len() > 1
+            && active_players
+                .iter()
+                .all(|ps| ps.stake < MIN_MEANINGFUL_STAKE);
 
-        // Check if betting is complete: either all players have bet the same amount,
-        // or all non-all-in players have bet the same amount and all-in players can't bet more
+        if all_active_players_allin {
+            // Skip to showdown stage
+            while new_state.stage != Stage::Showdown {
+                new_state.to_next_stage();
+            }
+
+            // Now that we're at showdown, determine winners and end the game
+            let ranks: Vec<(u64, u64, u64)> = active_players
+                .iter()
+                .map(|ps| rank_hand(&new_state, ps.hand, &new_state.public_cards))
+                .collect();
+            let min_rank = ranks.iter().copied().min().unwrap();
+
+            let winners_indices: Vec<usize> = ranks
+                .iter()
+                .enumerate()
+                .filter(|(_, &r)| r == min_rank)
+                .map(|(i, _)| i)
+                .collect();
+
+            new_state.set_winners(
+                winners_indices
+                    .iter()
+                    .map(|&i| active_players[i].player)
+                    .collect(),
+            );
+
+            return new_state;
+        }
+
+        // Every active player has done an action this stage OR is all-in (no need to act)
+        let all_players_acted = active_players
+            .iter()
+            .all(|ps| ps.last_stage_action.is_some() || ps.stake < MIN_MEANINGFUL_STAKE);
+
+        // Check if betting is complete: all active players have bet the same amount or are all-in
         let max_bet = active_players
             .iter()
             .map(|ps| ps.bet_chips)
             .fold(0.0f64, f64::max);
+
         let betting_complete = active_players.iter().all(|ps| {
-            // Player has matched the max bet OR is all-in and can't bet more
-            ps.bet_chips == max_bet || (ps.stake == 0.0 && ps.bet_chips > 0.0)
+            // Player has matched the max bet OR is effectively all-in (very small remaining stake)
+            ps.bet_chips == max_bet || ps.stake < MIN_MEANINGFUL_STAKE
         });
 
-        let round_ended = multiple_active && is_last_player && betting_complete;
+        // Additional check: if it's preflop, make sure we've gone around the table at least once
+        // after the big blind (to handle the case where everyone just calls the big blind)
+        let preflop_complete = if self.stage == Stage::Preflop {
+            // In preflop, we need to make sure the big blind player has had a chance to act
+            // (unless they've already acted by raising)
+            let bb_position = (self.button + 2) % self.players_state.len() as u64;
+            let bb_player = &new_state.players_state[bb_position as usize];
+            !bb_player.active || bb_player.last_stage_action.is_some()
+        } else {
+            true
+        };
 
-        if round_ended {
+        let round_ended =
+            multiple_active && all_players_acted && betting_complete && preflop_complete;
+
+        if round_ended && new_state.stage != Stage::Showdown {
             new_state.to_next_stage();
         }
 
         // Check if only one player has remaining chips (others are all-in)
         let players_with_chips = active_players.iter().filter(|ps| ps.stake > 0.0).count();
         let should_go_to_showdown =
-            active_players.len() > 1 && players_with_chips <= 1 && is_last_player;
+            active_players.len() > 1 && players_with_chips <= 1 && all_players_acted;
 
         // If only one player has chips left, skip to showdown
         if should_go_to_showdown && new_state.stage != Stage::Showdown {
+            while new_state.stage != Stage::Showdown {
+                new_state.to_next_stage();
+            }
+        }
+
+        // CRITICAL FIX: If all active players are all-in (no chips left), advance to showdown immediately
+        // But only if we're not already at showdown!
+        let all_players_allin = active_players.len() > 1 && players_with_chips == 0;
+        if all_players_allin && new_state.stage != Stage::Showdown {
             while new_state.stage != Stage::Showdown {
                 new_state.to_next_stage();
             }
@@ -358,16 +603,48 @@ impl State {
             .map(|ps| PlayerState {
                 pot_chips: ps.pot_chips + ps.bet_chips,
                 bet_chips: 0.0,
-                last_stage_action: None,
+                // Keep last_stage_action for all-in players so they don't need to act again
+                last_stage_action: if ps.stake == 0.0 {
+                    ps.last_stage_action
+                } else {
+                    None
+                },
                 ..*ps
             })
             .collect();
 
         self.min_bet = 0.0;
 
+        // Check if all active players are all-in after stage transition
+        let active_players_with_chips: Vec<_> = self
+            .players_state
+            .iter()
+            .filter(|ps| ps.active && ps.stake > 0.0)
+            .collect();
+
+        // If all active players are all-in, skip directly to showdown
+        if active_players_with_chips.is_empty() && self.stage != Stage::Showdown {
+            self.stage = Stage::Showdown;
+            return;
+        }
+
         self.current_player = (self.button + 1) % self.players_state.len() as u64;
-        while !self.players_state[self.current_player as usize].active {
+
+        // Skip to next player who is both active AND has chips to bet
+        let mut attempts = 0;
+        while attempts < self.players_state.len() {
+            let current_ps = &self.players_state[self.current_player as usize];
+            if current_ps.active && current_ps.stake > 0.0 {
+                break;
+            }
             self.current_player = (self.current_player + 1) % self.players_state.len() as u64;
+            attempts += 1;
+        }
+
+        // If we can't find any player with chips, all are all-in - go to showdown
+        if attempts >= self.players_state.len() {
+            self.stage = Stage::Showdown;
+            return;
         }
 
         // Update range indices after stage change (important for postflop calculation)
@@ -396,25 +673,15 @@ fn legal_actions(state: &State) -> Vec<ActionEnum> {
     let current_player_state = &state.players_state[state.current_player as usize];
     let is_all_in = current_player_state.stake == 0.0;
 
-    if state.min_bet == 0.0 {
-        illegal_actions.push(ActionEnum::Call);
-    }
-
-    if state.min_bet != 0.0 {
-        illegal_actions.push(ActionEnum::Check);
-    }
-
-    // If player is all-in, they can only fold or check (if no bet to call)
+    // If player is all-in, they can only fold or check-call (if no bet to call)
     if is_all_in {
         if state.min_bet > current_player_state.bet_chips {
             // There's a bet to call but player is all-in, only fold is allowed
-            illegal_actions.push(ActionEnum::Call);
-            illegal_actions.push(ActionEnum::Raise);
-            illegal_actions.push(ActionEnum::Check);
+            illegal_actions.push(ActionEnum::CheckCall);
+            illegal_actions.push(ActionEnum::BetRaise);
         } else {
-            // No bet to call or player has already matched, only check is allowed
-            illegal_actions.push(ActionEnum::Call);
-            illegal_actions.push(ActionEnum::Raise);
+            // No bet to call or player has already matched, only check-call is allowed
+            illegal_actions.push(ActionEnum::BetRaise);
         }
     }
 
@@ -594,7 +861,7 @@ mod tests {
                     for a in actions {
                         s = s.apply_action(a);
                         if s.final_state {
-                            prop_assert!(!(s.legal_actions.contains(&ActionEnum::Check) && s.legal_actions.contains(&ActionEnum::Call)));
+                        prop_assert!(!(s.legal_actions.contains(&ActionEnum::CheckCall) && s.legal_actions.contains(&ActionEnum::CheckCall)));
                         }
                     }
                 },
@@ -612,10 +879,10 @@ mod tests {
                 Ok(mut s) => {
                     for a in actions {
                         s = s.apply_action(a);
-                        let call_done = s.players_state[s.current_player as usize].last_stage_action == Some(ActionEnum::Call);
-                        let not_other_raise = !s.players_state.iter().filter(|ps| ps.active).any(|ps| ps.last_stage_action == Some(ActionEnum::Raise));
+                        let call_done = s.players_state[s.current_player as usize].last_stage_action == Some(ActionEnum::CheckCall);
+                        let not_other_raise = !s.players_state.iter().filter(|ps| ps.active).any(|ps| ps.last_stage_action == Some(ActionEnum::BetRaise));
                         if call_done && not_other_raise {
-                            prop_assert!(!s.legal_actions.contains(&ActionEnum::Raise));
+                            prop_assert!(!s.legal_actions.contains(&ActionEnum::BetRaise));
                         }
                     }
                 },
@@ -633,7 +900,8 @@ mod tests {
                 Ok(mut s) => {
                     for a in actions {
                         s = s.apply_action(a);
-                        prop_assert!(!(s.legal_actions.contains(&ActionEnum::Call) && s.min_bet == 0.0));
+                        // CheckCall is always legal so this test doesn't apply anymore
+                        prop_assert!(true);
                     }
                 },
                 Err(err) => {

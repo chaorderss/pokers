@@ -34,9 +34,8 @@ impl Action {
 #[cfg_attr(test, derive(Arbitrary))]
 pub enum ActionEnum {
     Fold,
-    Check,
-    Call,
-    Raise,
+    CheckCall,
+    BetRaise,
 }
 
 #[pyclass]
