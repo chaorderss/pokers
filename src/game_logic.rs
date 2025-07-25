@@ -168,26 +168,37 @@ impl State {
         }
 
         let mut new_state = self.clone();
-        let action_record = ActionRecord {
-            player: self.current_player,
-            action: action,
-            stage: self.stage,
-            legal_actions: self.legal_actions.clone(),
-        };
-        new_state.from_action = Some(action_record.clone());
-        new_state.action_list.push(action_record);
 
-        if !self.legal_actions.contains(&action.action) {
-            return State {
-                status: StateStatus::IllegalAction,
-                final_state: true,
-                ..new_state
-            };
-        }
+        // Handle illegal actions by converting them to legal alternatives
+        let actual_action = if !self.legal_actions.contains(&action.action) {
+            match action.action {
+                ActionEnum::CheckCall => {
+                    // If CheckCall is illegal, convert to Fold
+                    Action::new(ActionEnum::Fold, 0.0)
+                }
+                ActionEnum::BetRaise => {
+                    // If BetRaise is illegal, try CheckCall first, then Fold
+                    if self.legal_actions.contains(&ActionEnum::CheckCall) {
+                        Action::new(ActionEnum::CheckCall, 0.0)
+                    } else {
+                        Action::new(ActionEnum::Fold, 0.0)
+                    }
+                }
+                ActionEnum::Fold => {
+                    // Fold should always be legal, but if not, keep it as Fold
+                    action
+                }
+            }
+        } else {
+            action
+        };
 
         let player = self.current_player as usize;
 
-        match action.action {
+        // We'll create the ActionRecord after processing the action to record the actual amounts
+        let mut final_action_for_record = actual_action;
+
+        match actual_action.action {
             ActionEnum::Fold => {
                 new_state.players_state[player].active = false;
                 new_state.players_state[player].pot_chips += self.players_state[player].bet_chips;
@@ -213,6 +224,9 @@ impl State {
                     new_state.players_state[player].bet_chips += actual_chips;
                     new_state.players_state[player].stake -= actual_chips;
                     new_state.pot += actual_chips;
+
+                    // Update final_action_for_record with actual call amount
+                    final_action_for_record = Action::new(ActionEnum::CheckCall, actual_chips);
                 }
             }
 
@@ -220,10 +234,10 @@ impl State {
                 // If min_bet is 0, this acts as Bet; otherwise, it's a Raise
                 let bet = if self.min_bet == 0.0 {
                     // First bet (Bet)
-                    action.amount
+                    actual_action.amount
                 } else {
                     // Raise over the minimum bet
-                    (self.min_bet - self.players_state[player].bet_chips) + action.amount
+                    (self.min_bet - self.players_state[player].bet_chips) + actual_action.amount
                 };
 
                 let actual_bet = if bet > self.players_state[player].stake {
@@ -241,10 +255,23 @@ impl State {
                 if new_state.players_state[player].bet_chips > new_state.min_bet {
                     new_state.min_bet = new_state.players_state[player].bet_chips;
                 }
+
+                // Update final_action_for_record with actual bet amount
+                final_action_for_record = Action::new(ActionEnum::BetRaise, actual_bet);
             }
         };
 
-        new_state.players_state[player].last_stage_action = Some(action.action);
+        // Create ActionRecord with the corrected action amounts
+        let action_record = ActionRecord {
+            player: self.current_player,
+            action: final_action_for_record,
+            stage: self.stage,
+            legal_actions: self.legal_actions.clone(),
+        };
+        new_state.from_action = Some(action_record.clone());
+        new_state.action_list.push(action_record);
+
+        new_state.players_state[player].last_stage_action = Some(actual_action.action);
 
         // Check if all active players are all-in (have no remaining stake)
         // CRITICAL: Immediately check if all active players are all-in after any action
