@@ -231,33 +231,52 @@ impl State {
             }
 
             ActionEnum::BetRaise => {
-                // If min_bet is 0, this acts as Bet; otherwise, it's a Raise
-                let bet = if self.min_bet == 0.0 {
-                    // First bet (Bet)
-                    actual_action.amount
+                // Player wants to bet the specified amount (total chips to put in the pot)
+                let desired_total_bet = actual_action.amount;
+
+                // Calculate current player's bet
+                let current_player_bet = self.players_state[player].bet_chips;
+
+                // Check if the desired bet meets minimum requirements
+                let min_required_total = self.min_bet;
+                let actual_total_bet = if desired_total_bet < min_required_total {
+                    // If desired bet is less than minimum, use minimum
+                    min_required_total
                 } else {
-                    // Raise over the minimum bet
-                    (self.min_bet - self.players_state[player].bet_chips) + actual_action.amount
+                    // Use the desired amount
+                    desired_total_bet
                 };
 
-                let actual_bet = if bet > self.players_state[player].stake {
-                    // Player wants to bet more than they have - go all-in instead
-                    self.players_state[player].stake
+                // Calculate actual additional chips to bet
+                let actual_additional_chips = if actual_total_bet > current_player_bet {
+                    actual_total_bet - current_player_bet
                 } else {
-                    bet
+                    0.0
                 };
 
-                new_state.players_state[player].bet_chips += actual_bet;
-                new_state.players_state[player].stake -= actual_bet;
-                new_state.pot += actual_bet;
+                // Ensure player has enough chips
+                let final_additional_chips =
+                    if actual_additional_chips > self.players_state[player].stake {
+                        // Player doesn't have enough - go all-in
+                        self.players_state[player].stake
+                    } else {
+                        actual_additional_chips
+                    };
 
-                // Update min_bet only if this player's bet is higher than current min_bet
+                new_state.players_state[player].bet_chips += final_additional_chips;
+                new_state.players_state[player].stake -= final_additional_chips;
+                new_state.pot += final_additional_chips;
+
+                // Update min_bet only if this player's total bet is higher than current min_bet
                 if new_state.players_state[player].bet_chips > new_state.min_bet {
                     new_state.min_bet = new_state.players_state[player].bet_chips;
                 }
 
-                // Update final_action_for_record with actual bet amount
-                final_action_for_record = Action::new(ActionEnum::BetRaise, actual_bet);
+                // Update final_action_for_record with the actual total bet amount (not just additional chips)
+                final_action_for_record = Action::new(
+                    ActionEnum::BetRaise,
+                    new_state.players_state[player].bet_chips,
+                );
             }
         };
 
