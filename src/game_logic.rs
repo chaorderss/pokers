@@ -134,6 +134,8 @@ impl State {
             final_state: false,
             pot: sb + bb,
             min_bet: bb,
+            sb: sb,
+            bb: bb,
             status: StateStatus::Ok,
             verbose: verbose,
         };
@@ -208,8 +210,20 @@ impl State {
             }
 
             ActionEnum::CheckCall => {
-                // If min_bet is 0 (no bet to call), this acts as Check
-                if self.min_bet == 0.0 || self.min_bet <= self.players_state[player].bet_chips {
+                // Determine if this should be a Check or Call based on the stage and betting situation
+                let is_check = match self.stage {
+                    Stage::Preflop => {
+                        // In preflop, it's a check if player has already matched the big blind
+                        self.min_bet <= self.players_state[player].bet_chips
+                    }
+                    _ => {
+                        // In postflop stages, it's a check if no one has bet in this stage (min_bet == 0)
+                        // OR if the player has already matched the current betting level
+                        self.min_bet == 0.0 || self.min_bet <= self.players_state[player].bet_chips
+                    }
+                };
+
+                if is_check {
                     // Check - no action needed
                 } else {
                     // Call - match the minimum bet
@@ -329,17 +343,15 @@ impl State {
             && players_with_stake.is_empty()
             && new_state.stage != Stage::Showdown
         {
-            // Skip to showdown stage
-            while new_state.stage != Stage::Showdown {
-                new_state.to_next_stage();
-            }
+            // FIXED: Direct assignment to showdown stage instead of while loop to prevent infinite loops
+            new_state.stage = Stage::Showdown;
 
             // Determine winners and end the game
             let ranks: Vec<(u64, u64, u64)> = active_players
                 .iter()
                 .map(|ps| rank_hand(&new_state, ps.hand, &new_state.public_cards))
                 .collect();
-            let min_rank = ranks.iter().copied().min().unwrap();
+            let min_rank = ranks.iter().copied().min().unwrap_or((10, 0, 0));
 
             let winners_indices: Vec<usize> = ranks
                 .iter()
@@ -424,10 +436,8 @@ impl State {
 
         // If we couldn't find any player with chips, all active players are all-in
         if attempts >= self.players_state.len() {
-            // All active players are all-in, skip directly to showdown and end game
-            while new_state.stage != Stage::Showdown {
-                new_state.to_next_stage();
-            }
+            // FIXED: Direct assignment to showdown stage instead of while loop
+            new_state.stage = Stage::Showdown;
 
             // Determine winners and end the game immediately
             let active_players: Vec<PlayerState> = new_state
@@ -441,7 +451,7 @@ impl State {
                 .iter()
                 .map(|ps| rank_hand(&new_state, ps.hand, &new_state.public_cards))
                 .collect();
-            let min_rank = ranks.iter().copied().min().unwrap();
+            let min_rank = ranks.iter().copied().min().unwrap_or((10, 0, 0));
 
             let winners_indices: Vec<usize> = ranks
                 .iter()
@@ -476,17 +486,15 @@ impl State {
                 .all(|ps| ps.stake < MIN_MEANINGFUL_STAKE);
 
         if all_active_players_allin {
-            // Skip to showdown stage
-            while new_state.stage != Stage::Showdown {
-                new_state.to_next_stage();
-            }
+            // FIXED: Direct assignment to showdown stage instead of while loop
+            new_state.stage = Stage::Showdown;
 
             // Now that we're at showdown, determine winners and end the game
             let ranks: Vec<(u64, u64, u64)> = active_players
                 .iter()
                 .map(|ps| rank_hand(&new_state, ps.hand, &new_state.public_cards))
                 .collect();
-            let min_rank = ranks.iter().copied().min().unwrap();
+            let min_rank = ranks.iter().copied().min().unwrap_or((10, 0, 0));
 
             let winners_indices: Vec<usize> = ranks
                 .iter()
@@ -547,18 +555,16 @@ impl State {
 
         // If only one player has chips left, skip to showdown
         if should_go_to_showdown && new_state.stage != Stage::Showdown {
-            while new_state.stage != Stage::Showdown {
-                new_state.to_next_stage();
-            }
+            // FIXED: Direct assignment to showdown stage instead of while loop
+            new_state.stage = Stage::Showdown;
         }
 
         // CRITICAL FIX: If all active players are all-in (no chips left), advance to showdown immediately
         // But only if we're not already at showdown!
         let all_players_allin = active_players.len() > 1 && players_with_chips == 0;
         if all_players_allin && new_state.stage != Stage::Showdown {
-            while new_state.stage != Stage::Showdown {
-                new_state.to_next_stage();
-            }
+            // FIXED: Direct assignment to showdown stage instead of while loop
+            new_state.stage = Stage::Showdown;
         }
 
         // The game ends if every player except one has folded
@@ -566,12 +572,13 @@ impl State {
             new_state.set_winners(vec![active_players[0].player]);
         }
 
-        if new_state.stage == Stage::Showdown {
+        // Only do hand ranking comparison if there are multiple active players at showdown
+        if new_state.stage == Stage::Showdown && active_players.len() > 1 {
             let ranks: Vec<(u64, u64, u64)> = active_players
                 .iter()
                 .map(|ps| rank_hand(&new_state, ps.hand, &new_state.public_cards))
                 .collect();
-            let min_rank = ranks.iter().copied().min().unwrap();
+            let min_rank = ranks.iter().copied().min().unwrap_or((10, 0, 0));
 
             // Use verbose_println! macro instead of println!
             verbose_println!(&new_state, "Ranks: {:?}", ranks);
@@ -592,6 +599,9 @@ impl State {
                     .map(|&i| active_players[i].player)
                     .collect(),
             );
+        } else if new_state.stage == Stage::Showdown && active_players.len() == 1 {
+            // If only one player is active at showdown, they win automatically
+            new_state.set_winners(vec![active_players[0].player]);
         }
 
         new_state.legal_actions = legal_actions(&new_state);
@@ -746,13 +756,19 @@ fn rank_hand(
     let mut cards = public_cards.clone();
     cards.append(&mut vec![private_cards.0, private_cards.1]);
 
+    // Check if we have enough cards for a valid combination
+    if cards.len() < 5 {
+        // Return worst possible rank if not enough cards
+        return (10, 0, 0);
+    }
+
     let min_rank = cards
         .iter()
         .copied()
         .combinations(5)
         .map(|comb| rank_card_combination(comb))
         .min()
-        .unwrap();
+        .unwrap_or((10, 0, 0)); // Provide fallback value
 
     min_rank
 }

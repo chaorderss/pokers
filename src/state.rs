@@ -47,6 +47,12 @@ pub struct State {
     pub min_bet: f64,
 
     #[pyo3(get, set)]
+    pub sb: f64,
+
+    #[pyo3(get, set)]
+    pub bb: f64,
+
+    #[pyo3(get, set)]
     pub final_state: bool,
 
     #[pyo3(get, set)]
