@@ -60,6 +60,9 @@ pub struct State {
 
     #[pyo3(get, set)]
     pub verbose: bool,
+
+    #[pyo3(get, set)]
+    pub seed: u64,
 }
 
 #[pyclass]

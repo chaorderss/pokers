@@ -13,12 +13,13 @@ use crate::state::{PlayerState, State, StateStatus};
 // Define a macro for verbose printing controlled by environment variable
 macro_rules! verbose_println {
     ($state:expr, $($arg:tt)*) => {
-        if $state.verbose && std::env::var("POKERS_VERBOSE").is_ok() {
+        if $state.verbose {
             println!($($arg)*);
         }
     };
 }
 
+#[derive(Debug)]
 pub struct InitStateError {
     msg: String,
 }
@@ -46,11 +47,11 @@ impl State {
         let mut deck: Vec<Card> = Card::collect();
         deck.shuffle(&mut rng);
 
-        State::from_deck(n_players, button, sb, bb, stake, deck, verbose)
+        State::from_deck(n_players, button, sb, bb, stake, deck, verbose, seed)
     }
 
     #[staticmethod]
-    #[pyo3(signature = (n_players, button, sb, bb, stake, deck, verbose=false))]
+    #[pyo3(signature = (n_players, button, sb, bb, stake, deck, verbose=false, seed=0))]
     pub fn from_deck(
         n_players: u64,
         button: u64,
@@ -59,6 +60,7 @@ impl State {
         stake: f64,
         mut deck: Vec<Card>,
         verbose: bool,
+        seed: u64,
     ) -> Result<State, InitStateError> {
         if n_players < 2 {
             return Err(InitStateError {
@@ -138,6 +140,7 @@ impl State {
             bb: bb,
             status: StateStatus::Ok,
             verbose: verbose,
+            seed: seed,
         };
 
         // Update range indices for all players
@@ -148,9 +151,6 @@ impl State {
     }
 
     pub fn apply_action(&self, action: Action) -> State {
-        // Define MIN_MEANINGFUL_STAKE at the top of the function for consistent use
-        const MIN_MEANINGFUL_STAKE: f64 = 1.0;
-
         match self.status {
             StateStatus::Ok => (),
             _ => return self.clone(),
@@ -228,9 +228,14 @@ impl State {
                 } else {
                     // Call - match the minimum bet
                     let required_chips = self.min_bet - self.players_state[player].bet_chips;
-                    let actual_chips = if required_chips > self.players_state[player].stake {
+                    let player_stake = self.players_state[player].stake;
+
+                    let actual_chips = if required_chips > player_stake {
                         // Player doesn't have enough chips to call - go all-in instead
-                        self.players_state[player].stake
+                        player_stake
+                    } else if player_stake - required_chips < 1.0 {
+                        // If remaining chips after call would be < 1, go all-in
+                        player_stake
                     } else {
                         required_chips
                     };
@@ -250,10 +255,20 @@ impl State {
 
                 // Calculate current player's bet
                 let current_player_bet = self.players_state[player].bet_chips;
+                let player_stake = self.players_state[player].stake;
 
                 // Check if the desired bet meets minimum requirements
                 let min_required_total = self.min_bet;
-                let actual_total_bet = if desired_total_bet < min_required_total {
+
+                // New logic: If stake < min_bet, allow betting all chips
+                // Or if remaining chips after bet would be < 1, bet all chips
+                let actual_total_bet = if player_stake < min_required_total
+                    || (desired_total_bet > current_player_bet
+                        && player_stake - (desired_total_bet - current_player_bet) < 1.0)
+                {
+                    // Go all-in
+                    current_player_bet + player_stake
+                } else if desired_total_bet < min_required_total {
                     // If desired bet is less than minimum, use minimum
                     min_required_total
                 } else {
@@ -315,27 +330,12 @@ impl State {
             .filter(|ps| ps.active)
             .collect();
 
-        // CRITICAL FIX: Players have meaningful stake only if their remaining chips
-        // are significant both in absolute terms AND relative to current betting level
+        // Check if all active players are effectively all-in
         let players_with_stake: Vec<&PlayerState> = active_players
             .iter()
             .filter(|ps| {
-                // Absolute threshold: must have at least MIN_MEANINGFUL_STAKE
-                if ps.stake < MIN_MEANINGFUL_STAKE {
-                    return false;
-                }
-
-                // Relative threshold: remaining stake should be meaningful relative to current bet
-                // If they've already bet significantly, remaining chips should be substantial
-                if ps.bet_chips > 0.0 {
-                    // Player's remaining stake should be at least 5% of what they've already bet
-                    // OR enough to make a meaningful raise (whichever is larger)
-                    let min_relative_stake = (ps.bet_chips * 0.05).max(MIN_MEANINGFUL_STAKE);
-                    ps.stake >= min_relative_stake
-                } else {
-                    // No bet yet, just need absolute threshold
-                    true
-                }
+                // Player has meaningful stake if they have chips remaining
+                ps.stake > 0.0
             })
             .collect();
 
@@ -479,11 +479,9 @@ impl State {
             .collect();
         let multiple_active = active_players.len() >= 2;
 
-        // CRITICAL FIX: If all active players are all-in, skip to showdown and end the game immediately
-        let all_active_players_allin = active_players.len() > 1
-            && active_players
-                .iter()
-                .all(|ps| ps.stake < MIN_MEANINGFUL_STAKE);
+        // Check if all active players are all-in (no chips left)
+        let all_active_players_allin =
+            active_players.len() > 1 && active_players.iter().all(|ps| ps.stake == 0.0);
 
         if all_active_players_allin {
             // FIXED: Direct assignment to showdown stage instead of while loop
@@ -516,7 +514,7 @@ impl State {
         // Every active player has done an action this stage OR is all-in (no need to act)
         let all_players_acted = active_players
             .iter()
-            .all(|ps| ps.last_stage_action.is_some() || ps.stake < MIN_MEANINGFUL_STAKE);
+            .all(|ps| ps.last_stage_action.is_some() || ps.stake == 0.0);
 
         // Check if betting is complete: all active players have bet the same amount or are all-in
         let max_bet = active_players
@@ -525,8 +523,8 @@ impl State {
             .fold(0.0f64, f64::max);
 
         let betting_complete = active_players.iter().all(|ps| {
-            // Player has matched the max bet OR is effectively all-in (very small remaining stake)
-            ps.bet_chips == max_bet || ps.stake < MIN_MEANINGFUL_STAKE
+            // Player has matched the max bet OR is all-in (no remaining stake)
+            ps.bet_chips == max_bet || ps.stake == 0.0
         });
 
         // Additional check: if it's preflop, make sure we've gone around the table at least once
@@ -881,7 +879,7 @@ mod tests {
     proptest! {
         #[test]
         fn from_deck_doesnt_crash(n_players in 0..10000, deck: Vec<Card>, sb in 0.5_f64..100.0_f64, bb_mult in 2..5, stake_mult in 100..1000, actions: Vec<Action>) {
-            let initial_state = State::from_deck(n_players as u64, 0, sb, sb * bb_mult as f64, sb * stake_mult as f64, deck, false);
+            let initial_state = State::from_deck(n_players as u64, 0, sb, sb * bb_mult as f64, sb * stake_mult as f64, deck, false, 12345);
             match initial_state {
                 Ok(mut s) => {
                     for a in actions {
