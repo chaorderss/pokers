@@ -361,162 +361,6 @@ impl State {
 
         new_state.players_state[player].last_stage_action = Some(actual_action.action);
 
-        // EARLY ALL-IN CHECK: Immediately check if all active players are all-in after any action
-        let initial_active_players: Vec<PlayerState> = new_state
-            .players_state
-            .iter()
-            .copied()
-            .filter(|ps| ps.active)
-            .collect();
-
-        verbose_println!(
-            &new_state,
-            "DEBUG: Initial active players check - count: {}",
-            initial_active_players.len()
-        );
-
-        // Check if all active players are effectively all-in
-        let players_with_stake: Vec<&PlayerState> = initial_active_players
-            .iter()
-            .filter(|ps| {
-                // Player has meaningful stake if they have chips remaining
-                ps.stake > 0.0
-            })
-            .collect();
-
-        verbose_println!(
-            &new_state,
-            "DEBUG: Players with stake: {}",
-            players_with_stake.len()
-        );
-
-        if !initial_active_players.is_empty()
-            && players_with_stake.is_empty()
-            && new_state.stage != Stage::Showdown
-        {
-            verbose_println!(
-                &new_state,
-                "DEBUG: All active players are all-in, forcing showdown"
-            );
-            new_state.complete_to_showdown();
-            return new_state;
-        }
-
-        // STAGE ADVANCEMENT LOGIC: If no active players have remaining stake to bet, advance to next stage
-        let active_players_with_stake = new_state
-            .players_state
-            .iter()
-            .copied()
-            .filter(|ps| ps.active && ps.stake > 0.0)
-            .collect::<Vec<PlayerState>>();
-
-        verbose_println!(
-            &new_state,
-            "DEBUG: Active players with stake: {}",
-            active_players_with_stake.len()
-        );
-
-        // If no active players have remaining stake to bet, advance to next stage or end game
-        // BUT only if we're not already at Showdown (which should end the game)
-        if active_players_with_stake.is_empty() && new_state.stage != Stage::Showdown {
-            verbose_println!(
-                &new_state,
-                "DEBUG: No players with stake, advancing stage from {:?}",
-                new_state.stage
-            );
-            // All active players are all-in, should advance the game
-            match new_state.stage {
-                Stage::Preflop => {
-                    new_state.stage = Stage::Flop;
-                    new_state.current_player = 0;
-                }
-                Stage::Flop => {
-                    new_state.stage = Stage::Turn;
-                    new_state.current_player = 0;
-                }
-                Stage::Turn => {
-                    new_state.stage = Stage::River;
-                    new_state.current_player = 0;
-                }
-                Stage::River => {
-                    new_state.stage = Stage::Showdown;
-                }
-                Stage::Showdown => {
-                    // Already at showdown, game should end - trigger winner selection
-                    new_state.final_state = true;
-                }
-            }
-            verbose_println!(
-                &new_state,
-                "DEBUG: Advanced to stage: {:?}",
-                new_state.stage
-            );
-            // Return immediately since no more actions needed
-            return new_state;
-        }
-
-        // CRITICAL: If we're at Showdown stage, no more actions are needed - just return
-        if new_state.stage == Stage::Showdown {
-            verbose_println!(
-                &new_state,
-                "DEBUG: Already at showdown, setting final state"
-            );
-            new_state.final_state = true;
-            return new_state;
-        }
-
-        // Move to next player, but skip players who are inactive OR all-in (no remaining stake)
-        // BUT don't do this if we're at Showdown - just return
-        if new_state.stage == Stage::Showdown {
-            return new_state;
-        }
-
-        verbose_println!(
-            &new_state,
-            "DEBUG: Finding next player from current: {}",
-            new_state.current_player
-        );
-
-        new_state.current_player = (self.current_player + 1) % self.players_state.len() as u64;
-        let mut attempts = 0;
-        while attempts < self.players_state.len() {
-            let current_ps = &new_state.players_state[new_state.current_player as usize];
-
-            verbose_println!(
-                &new_state,
-                "DEBUG: Checking player {} - active: {}, stake: {}",
-                new_state.current_player,
-                current_ps.active,
-                current_ps.stake
-            );
-
-            // Player is eligible to act if they are active AND have remaining stake to bet
-            if current_ps.active && current_ps.stake > 0.0 {
-                verbose_println!(
-                    &new_state,
-                    "DEBUG: Found eligible player: {}",
-                    new_state.current_player
-                );
-                break;
-            }
-
-            new_state.current_player =
-                (new_state.current_player + 1) % self.players_state.len() as u64;
-            attempts += 1;
-        }
-
-        // If we couldn't find any player with chips, all active players are all-in
-        if attempts >= self.players_state.len() {
-            verbose_println!(
-                &new_state,
-                "DEBUG: No eligible players found, forcing showdown"
-            );
-
-            // Complete to showdown and determine winners
-            new_state.complete_to_showdown();
-            return new_state;
-        }
-
         // CRITICAL LOGIC: Re-collect active players and analyze the game state
         let active_players: Vec<PlayerState> = new_state
             .players_state
@@ -531,6 +375,13 @@ impl State {
             active_players.len(),
             new_state.stage
         );
+
+        // If only one player is active, they win automatically
+        if active_players.len() == 1 {
+            verbose_println!(&new_state, "DEBUG: Only one active player, setting winner");
+            new_state.set_winners(vec![active_players[0].player]);
+            return new_state;
+        }
 
         // Count players with remaining chips
         let players_with_chips = active_players.iter().filter(|ps| ps.stake > 0.0).count();
@@ -553,13 +404,6 @@ impl State {
 
             // Complete all remaining stages and handle showdown
             new_state.complete_to_showdown();
-            return new_state;
-        }
-
-        // If only one player is active, they win automatically
-        if active_players.len() == 1 {
-            verbose_println!(&new_state, "DEBUG: Only one active player, setting winner");
-            new_state.set_winners(vec![active_players[0].player]);
             return new_state;
         }
 
@@ -623,36 +467,116 @@ impl State {
             new_state.to_next_stage();
         }
 
-        // Handle showdown logic if we're at showdown stage
-        if new_state.stage == Stage::Showdown && active_players.len() > 1 {
-            verbose_println!(&new_state, "DEBUG: At showdown with multiple players");
-
-            let ranks: Vec<(u64, u64, u64)> = active_players
-                .iter()
-                .map(|ps| rank_hand(&new_state, ps.hand, &new_state.public_cards))
-                .collect();
-            let min_rank = ranks.iter().copied().min().unwrap_or((10, 0, 0));
-
-            verbose_println!(&new_state, "DEBUG: Hand ranks: {:?}", ranks);
-
-            let winners_indices: Vec<usize> = ranks
-                .iter()
-                .enumerate()
-                .filter(|(_, &r)| r == min_rank)
-                .map(|(i, _)| i)
-                .collect();
-
-            verbose_println!(&new_state, "DEBUG: Winner indices: {:?}", winners_indices);
-
-            new_state.set_winners(
-                winners_indices
-                    .iter()
-                    .map(|&i| active_players[i].player)
-                    .collect(),
+        // If we're not at showdown, find the next player to act
+        if new_state.stage != Stage::Showdown {
+            verbose_println!(
+                &new_state,
+                "DEBUG: Finding next player from current: {}",
+                new_state.current_player
             );
-        } else if new_state.stage == Stage::Showdown && active_players.len() == 1 {
-            verbose_println!(&new_state, "DEBUG: At showdown with single player");
-            new_state.set_winners(vec![active_players[0].player]);
+
+            new_state.current_player = (self.current_player + 1) % self.players_state.len() as u64;
+            let mut attempts = 0;
+            let max_attempts = self.players_state.len() * 2; // Safety margin
+
+            while attempts < max_attempts {
+                let current_ps = &new_state.players_state[new_state.current_player as usize];
+
+                verbose_println!(
+                    &new_state,
+                    "DEBUG: Checking player {} - active: {}, stake: {}, attempts: {}",
+                    new_state.current_player,
+                    current_ps.active,
+                    current_ps.stake,
+                    attempts
+                );
+
+                // Player is eligible to act if they are active AND have remaining stake to bet
+                if current_ps.active && current_ps.stake > 0.0 {
+                    verbose_println!(
+                        &new_state,
+                        "DEBUG: Found eligible player: {}",
+                        new_state.current_player
+                    );
+                    break;
+                }
+
+                new_state.current_player =
+                    (new_state.current_player + 1) % self.players_state.len() as u64;
+                attempts += 1;
+
+                // Safety check: if we've gone through all players once, force showdown
+                if attempts >= self.players_state.len() {
+                    verbose_println!(
+                        &new_state,
+                        "DEBUG: Completed full cycle, no eligible players found"
+                    );
+                    break;
+                }
+            }
+
+            // If we couldn't find any player with chips, all active players are all-in
+            if attempts >= self.players_state.len() {
+                verbose_println!(
+                    &new_state,
+                    "DEBUG: No eligible players found, forcing showdown"
+                );
+
+                // Complete to showdown and determine winners
+                new_state.complete_to_showdown();
+                return new_state;
+            }
+
+            // Additional safety check for infinite loop prevention
+            if attempts >= max_attempts {
+                verbose_println!(
+                    &new_state,
+                    "ERROR: Potential infinite loop detected, forcing showdown"
+                );
+                new_state.complete_to_showdown();
+                return new_state;
+            }
+        }
+
+        // Handle showdown logic if we're at showdown stage
+        if new_state.stage == Stage::Showdown {
+            let final_active_players: Vec<PlayerState> = new_state
+                .players_state
+                .iter()
+                .copied()
+                .filter(|ps| ps.active)
+                .collect();
+
+            if final_active_players.len() > 1 {
+                verbose_println!(&new_state, "DEBUG: At showdown with multiple players");
+
+                let ranks: Vec<(u64, u64, u64)> = final_active_players
+                    .iter()
+                    .map(|ps| rank_hand(&new_state, ps.hand, &new_state.public_cards))
+                    .collect();
+                let min_rank = ranks.iter().copied().min().unwrap_or((10, 0, 0));
+
+                verbose_println!(&new_state, "DEBUG: Hand ranks: {:?}", ranks);
+
+                let winners_indices: Vec<usize> = ranks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &r)| r == min_rank)
+                    .map(|(i, _)| i)
+                    .collect();
+
+                verbose_println!(&new_state, "DEBUG: Winner indices: {:?}", winners_indices);
+
+                new_state.set_winners(
+                    winners_indices
+                        .iter()
+                        .map(|&i| final_active_players[i].player)
+                        .collect(),
+                );
+            } else if final_active_players.len() == 1 {
+                verbose_println!(&new_state, "DEBUG: At showdown with single player");
+                new_state.set_winners(vec![final_active_players[0].player]);
+            }
         }
 
         new_state.legal_actions = legal_actions(&new_state);
@@ -839,8 +763,8 @@ impl State {
 
             if !pot_winners.is_empty() {
                 let reward_per_winner = total_pot_for_slice / pot_winners.len() as f64;
-                for winner_id in &pot_winners {
-                    self.players_state[*winner_id as usize].reward += reward_per_winner;
+                for winner_id in pot_winners {
+                    self.players_state[winner_id as usize].reward += reward_per_winner;
                 }
             }
             last_level = level;

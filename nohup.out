@@ -80,3 +80,50 @@ Loading initial weights from checkpoint: /home/hj/beans/models_batch/gto_preflop
   👤 CO | Hand: 3♠ 4♠ | 🔴 | Profit: $-400.00 | range_idx: 83
 ============================================================
 
+Using device: cuda
+DeepCFRAgent models reset successfully.
+learning_agent Loading initial weights from checkpoint: /home/hj/beans/models_batch/selfplay_batch_checkpoint_iter_5.pt
+DeepCFRAgent models reset successfully.
+Loading initial weights from checkpoint: /home/hj/beans/models_batch/gto_preflop_batch_checkpoint_iter_195.pt
+🎯 Game 0 Action Sequence:
+   🃏 Preflop: UTG(check) --> HJ(check) --> CO(check) --> BTN(check) --> SB(check) --> BB(check)
+   🌊 Flop: UTG(check) --> HJ(check) --> CO(check) --> BTN(check) --> SB(check) --> BB(check)
+   🔄 Turn: UTG(check) --> HJ(check) --> CO(check) --> BTN(check) --> SB(check) --> BB(check)
+   🏁 River: UTG(check) --> HJ(check) --> CO(check) --> BTN(check) --> SB(check) --> BB(check)
+
+🎮 Game 0 (FINAL) ==================================================
+👤 Player 2 (BB) res_pos: 4 | Hand: 6♦ 10♠ | range_idx: 544
+   Action: check | Stake: $398.00 | Bet: $0.00 | 🔴 Folded
+❓ Stage: Showdown | 💰 Pot: $12.00
+🃏 Community: J♦ 5♣ 2♥ Q♠ 7♦
+
+🏁 Final Results:
+  🤖 BTN | Hand: 8♠ 7♠ | 🔴 | Profit: $-2.00 | range_idx: 321
+  👤 SB | Hand: 4♦ J♠ | 🔴 | Profit: $-2.00 | range_idx: 674
+  👤 BB | Hand: 6♦ 10♠ | 🔴 | Profit: $-2.00 | range_idx: 544
+  👤 UTG | Hand: 8♦ 6♥ | 🔴 | Profit: $-2.00 | range_idx: 295
+  👤 HJ | Hand: 3♥ 9♠ | 🔴 | Profit: $-2.00 | range_idx: 413
+  👤 CO | Hand: Q♣ 8♣ | 🔴 | Profit: $10.00 | range_idx: 887
+============================================================
+
+🎯 Game 100 Action Sequence:
+   🃏 Preflop: UTG(2.1bb) --> HJ(5.0bb) --> CO(12.0bb) --> BTN(28.7bb) --> SB(68.7bb) --> BB(68.7bb) --> UTG(197.9bb) --> HJ(call) --> CO(call) --> BTN(call) --> SB(call) --> BB(call)
+   🌊 Flop: UTG(check) --> HJ(check) --> CO(check) --> BTN(check) --> SB(check) --> BB(fold)
+   🔄 Turn: UTG(check) --> HJ(check) --> CO(check) --> BTN(check) --> SB(check)
+   🏁 River: UTG(check) --> HJ(check) --> CO(check) --> BTN(check) --> SB(check)
+
+🎮 Game 100 (FINAL) ==================================================
+👤 Player 5 (SB) res_pos: 5 | Hand: A♣ Q♥ | range_idx: 1265
+   Action: check | Stake: $4.18 | Bet: $0.00 | 🔴 Folded
+❓ Stage: Showdown | 💰 Pot: $2374.91
+🃏 Community: 4♥ 3♣ J♥ 9♠ 3♦
+
+🏁 Final Results:
+  🤖 BB | Hand: 2♥ 5♣ | 🔴 | Profit: $-395.82 | range_idx: 91
+  👤 UTG | Hand: 3♥ 6♣ | 🔴 | Profit: $1979.09 | range_idx: 157
+  👤 HJ | Hand: A♥ 8♣ | 🔴 | Profit: $-395.82 | range_idx: 1154
+  👤 CO | Hand: 4♦ 9♥ | 🔴 | Profit: $-395.82 | range_idx: 389
+  👤 BTN | Hand: 8♠ 10♦ | 🔴 | Profit: $-395.82 | range_idx: 620
+  👤 SB | Hand: A♣ Q♥ | 🔴 | Profit: $-395.82 | range_idx: 1265
+============================================================
+
