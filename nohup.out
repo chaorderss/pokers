@@ -1,0 +1,82 @@
+Using device: cuda
+DeepCFRAgent models reset successfully.
+DeepCFRAgent models reset successfully.
+Loading initial weights from checkpoint: /home/hj/beans/models_batch/gto_preflop_batch_checkpoint_iter_195.pt
+🎯 Game 0 Action Sequence:
+   🃏 Preflop: UTG(2.1bb) --> HJ(5.0bb) --> CO(12.0bb) --> BTN(call) --> SB(45.4bb) --> BB(108.0bb) --> UTG(197.9bb) --> HJ(all-in) --> CO(all-in) --> BTN(all-in) --> SB(all-in) --> BB(all-in)
+
+🎮 Game 0 (FINAL) ==================================================
+👤 Player 2 (BB) res_pos: 4 | Hand: 6♣ 5♣ | range_idx: 62
+   Action: 92.0bb | Stake: $0.00 | Bet: $0.00 | 🔴 Folded
+❓ Stage: Showdown | 💰 Pot: $2395.82
+🃏 Community: A♠ 8♥ 3♥ 10♠ 4♥
+
+🏁 Final Results:
+  🤖 BTN | Hand: 5♠ 9♥ | 🔴 | Profit: $-400.00 | range_idx: 149
+  👤 SB | Hand: Q♦ 3♦ | 🔴 | Profit: $-400.00 | range_idx: 71
+  👤 BB | Hand: 6♣ 5♣ | 🔴 | Profit: $-400.00 | range_idx: 62
+  👤 UTG | Hand: K♠ 6♠ | 🔴 | Profit: $-395.82 | range_idx: 52
+  👤 HJ | Hand: 9♦ A♦ | 🟢 | Profit: $1995.82 | range_idx: 18
+  👤 CO | Hand: 10♦ J♠ | 🔴 | Profit: $-400.00 | range_idx: 46
+============================================================
+
+🎯 Game 100 Action Sequence:
+   🃏 Preflop: UTG(check) --> HJ(check) --> CO(check) --> BTN(check) --> SB(check) --> BB(check)
+   🌊 Flop: SB(check) --> BB(fold) --> UTG(check) --> HJ(check) --> CO(check) --> BTN(check)
+   🔄 Turn: SB(check) --> UTG(check) --> HJ(check) --> CO(check) --> BTN(check)
+   🏁 River: SB(check) --> UTG(check) --> HJ(check) --> CO(check) --> BTN(check)
+
+🎮 Game 100 (FINAL) ==================================================
+👤 Player 4 (BTN) res_pos: 0 | Hand: 5♣ J♦ | range_idx: 715
+   Action: check | Stake: $398.00 | Bet: $0.00 | 🟢 Active
+❓ Stage: Showdown | 💰 Pot: $12.00
+🃏 Community: Q♥ 8♣ J♣ A♣ 3♥
+
+🏁 Final Results:
+  🤖 BB | Hand: 9♦ A♥ | 🔴 | Profit: $-2.00 | range_idx: 1206
+  👤 UTG | Hand: 4♦ 6♠ | 🔴 | Profit: $-2.00 | range_idx: 181
+  👤 HJ | Hand: 7♠ 2♠ | 🔴 | Profit: $-2.00 | range_idx: 256
+  👤 CO | Hand: 4♥ 5♠ | 🔴 | Profit: $-2.00 | range_idx: 114
+  👤 BTN | Hand: 5♣ J♦ | 🟢 | Profit: $10.00 | range_idx: 715
+  👤 SB | Hand: 3♣ 9♠ | 🔴 | Profit: $-2.00 | range_idx: 469
+============================================================
+
+🎯 Game 200 Action Sequence:
+   🃏 Preflop: UTG(check) --> HJ(check) --> CO(4.9bb) --> BTN(call) --> SB(call) --> BB(call) --> UTG(call) --> HJ(call)
+   🌊 Flop: SB(check) --> BB(check) --> UTG(check) --> HJ(check) --> CO(check) --> BTN(check)
+   🔄 Turn: SB(check) --> BB(check) --> UTG(check) --> HJ(48.5bb) --> CO(fold) --> BTN(call) --> SB(call) --> BB(call) --> UTG(call)
+   🏁 River: SB(check) --> BB(check) --> UTG(check) --> HJ(146.6bb) --> BTN(call) --> SB(call) --> BB(call)
+
+🎮 Game 200 (FINAL) ==================================================
+👤 Player 4 (BB) res_pos: 4 | Hand: 5♣ 2♥ | range_idx: 69
+   Action: check | Stake: $0.00 | Bet: $0.00 | 🔴 Folded
+❓ Stage: Showdown | 💰 Pot: $1716.61
+🃏 Community: 7♠ 6♦ 6♣ 6♥ 7♣
+
+🏁 Final Results:
+  🤖 HJ | Hand: Q♦ J♦ | 🔴 | Profit: $-400.00 | range_idx: 899
+  👤 CO | Hand: 6♠ K♦ | 🔴 | Profit: $-9.77 | range_idx: 1052
+  👤 BTN | Hand: 10♠ 8♣ | 🔴 | Profit: $-400.00 | range_idx: 552
+  👤 SB | Hand: 5♠ 7♦ | 🟢 | Profit: $1316.61 | range_idx: 244
+  👤 BB | Hand: 5♣ 2♥ | 🔴 | Profit: $-400.00 | range_idx: 69
+  👤 UTG | Hand: 8♦ 9♥ | 🔴 | Profit: $-106.84 | range_idx: 491
+============================================================
+
+🎯 Game 300 Action Sequence:
+   🃏 Preflop: UTG(2.1bb) --> HJ(5.0bb) --> CO(12.0bb) --> BTN(fold) --> SB(28.7bb) --> BB(68.0bb) --> UTG(161.4bb) --> HJ(195.0bb) --> CO(all-in) --> SB(all-in) --> BB(all-in) --> UTG(all-in)
+
+🎮 Game 300 (FINAL) ==================================================
+👤 Player 3 (UTG) res_pos: 3 | Hand: K♠ 5♥ | range_idx: 127
+   Action: 38.6bb | Stake: $0.00 | Bet: $0.00 | 🔴 Folded
+❓ Stage: Showdown | 💰 Pot: $1989.98
+🃏 Community: J♣ K♦ 2♣ 10♠ 8♠
+
+🏁 Final Results:
+  🤖 BTN | Hand: Q♠ 2♥ | 🔴 | Profit: $-0.00 | range_idx: 145
+  👤 SB | Hand: J♥ A♦ | 🔴 | Profit: $-400.00 | range_idx: 26
+  👤 BB | Hand: 6♠ 9♠ | 🔴 | Profit: $-400.00 | range_idx: 67
+  👤 UTG | Hand: K♠ 5♥ | 🔴 | Profit: $-400.00 | range_idx: 127
+  👤 HJ | Hand: 2♦ K♥ | 🟢 | Profit: $1600.00 | range_idx: 134
+  👤 CO | Hand: 3♠ 4♠ | 🔴 | Profit: $-400.00 | range_idx: 83
+============================================================
+

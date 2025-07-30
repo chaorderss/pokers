@@ -398,8 +398,6 @@ impl State {
                 &new_state,
                 "DEBUG: All active players are all-in, forcing showdown"
             );
-            // FIXED: Direct assignment to showdown stage instead of while loop to prevent infinite loops
-            new_state.stage = Stage::Showdown;
             new_state.complete_to_showdown();
             return new_state;
         }
@@ -513,8 +511,6 @@ impl State {
                 &new_state,
                 "DEBUG: No eligible players found, forcing showdown"
             );
-            // FIXED: Direct assignment to showdown stage instead of while loop
-            new_state.stage = Stage::Showdown;
 
             // Complete to showdown and determine winners
             new_state.complete_to_showdown();
@@ -554,7 +550,6 @@ impl State {
                 &new_state,
                 "DEBUG: Forcing showdown - multiple active players but <= 1 with chips"
             );
-            new_state.stage = Stage::Showdown;
 
             // Complete all remaining stages and handle showdown
             new_state.complete_to_showdown();
@@ -668,7 +663,7 @@ impl State {
     fn complete_to_showdown(&mut self) {
         verbose_println!(
             self,
-            "DEBUG: Completing game to showdown from stage {:?}",
+            "DEBUG: Completing to showdown from stage {:?}",
             self.stage
         );
 
@@ -678,39 +673,54 @@ impl State {
             player_state.bet_chips = 0.0;
         }
 
-        // Deal remaining community cards if needed
-        while self.stage != Stage::Showdown {
-            match self.stage {
-                Stage::Preflop => {
-                    // Deal flop (3 cards)
-                    for _ in 0..3 {
-                        if !self.deck.is_empty() {
-                            self.public_cards.push(self.deck.remove(0));
-                        }
-                    }
-                    self.stage = Stage::Flop;
-                }
-                Stage::Flop => {
-                    // Deal turn (1 card)
+        // Deal all remaining community cards if needed
+        let current_stage = self.stage;
+        match current_stage {
+            Stage::Preflop => {
+                // Deal flop (3 cards)
+                for _ in 0..3 {
                     if !self.deck.is_empty() {
                         self.public_cards.push(self.deck.remove(0));
                     }
-                    self.stage = Stage::Turn;
                 }
-                Stage::Turn => {
-                    // Deal river (1 card)
-                    if !self.deck.is_empty() {
-                        self.public_cards.push(self.deck.remove(0));
-                    }
-                    self.stage = Stage::River;
+                // Deal turn (1 card)
+                if !self.deck.is_empty() {
+                    self.public_cards.push(self.deck.remove(0));
                 }
-                Stage::River => {
-                    self.stage = Stage::Showdown;
+                // Deal river (1 card)
+                if !self.deck.is_empty() {
+                    self.public_cards.push(self.deck.remove(0));
                 }
-                Stage::Showdown => break,
             }
-            verbose_println!(self, "DEBUG: Advanced to stage {:?}", self.stage);
+            Stage::Flop => {
+                // Deal turn (1 card)
+                if !self.deck.is_empty() {
+                    self.public_cards.push(self.deck.remove(0));
+                }
+                // Deal river (1 card)
+                if !self.deck.is_empty() {
+                    self.public_cards.push(self.deck.remove(0));
+                }
+            }
+            Stage::Turn => {
+                // Deal river (1 card)
+                if !self.deck.is_empty() {
+                    self.public_cards.push(self.deck.remove(0));
+                }
+            }
+            Stage::River | Stage::Showdown => {
+                // All cards already dealt or we're already at showdown
+            }
         }
+
+        verbose_println!(
+            self,
+            "DEBUG: Dealt remaining cards, public cards now: {}",
+            self.public_cards.len()
+        );
+
+        // Set stage to showdown
+        self.stage = Stage::Showdown;
 
         // Now determine winners at showdown
         let active_players: Vec<PlayerState> = self
@@ -721,60 +731,130 @@ impl State {
             .collect();
 
         if active_players.len() > 1 {
-            let ranks: Vec<(u64, u64, u64)> = active_players
+            let mut player_ranks: Vec<(u64, (u64, u64, u64))> = active_players
                 .iter()
-                .map(|ps| rank_hand(self, ps.hand, &self.public_cards))
-                .collect();
-            let min_rank = ranks.iter().copied().min().unwrap_or((10, 0, 0));
-
-            verbose_println!(self, "DEBUG: Final hand ranks: {:?}", ranks);
-
-            let winners_indices: Vec<usize> = ranks
-                .iter()
-                .enumerate()
-                .filter(|(_, &r)| r == min_rank)
-                .map(|(i, _)| i)
+                .map(|ps| {
+                    let rank = rank_hand(self, ps.hand, &self.public_cards);
+                    (ps.player, rank)
+                })
                 .collect();
 
-            self.set_winners(
-                winners_indices
-                    .iter()
-                    .map(|&i| active_players[i].player)
-                    .collect(),
-            );
+            // Sort by best hand (lowest rank tuple)
+            player_ranks.sort_by_key(|&(_, rank)| rank);
+
+            // Find all players with the best hand
+            let best_rank = player_ranks[0].1;
+            let winners: Vec<u64> = player_ranks
+                .iter()
+                .filter(|(_, rank)| *rank == best_rank)
+                .map(|(player, _)| *player)
+                .collect();
+
+            self.set_winners(winners);
         } else if active_players.len() == 1 {
+            // Only one player left, they win
             self.set_winners(vec![active_players[0].player]);
         }
     }
 
     fn set_winners(&mut self, winners: Vec<u64>) {
         assert!(winners.iter().all(|&p| p < self.players_state.len() as u64));
-
         verbose_println!(self, "DEBUG: Setting winners: {:?}", winners);
 
-        let winner_reward = self
-            .players_state
-            .iter()
-            .filter(|&&ps| !winners.contains(&ps.player))
-            .map(|ps| ps.pot_chips + ps.bet_chips)
-            .fold(0.0, |c1, c2| c1 + c2)
-            / winners.len() as f64;
+        // Move all bet_chips to pot_chips for final calculation
+        for p in &mut self.players_state {
+            p.pot_chips += p.bet_chips;
+            p.bet_chips = 0.0;
+        }
 
-        self.players_state = self
+        // Initialize rewards to zero
+        for p in &mut self.players_state {
+            p.reward = 0.0;
+        }
+
+        let showdown_players: Vec<_> = self
             .players_state
             .iter()
-            .map(|ps| PlayerState {
-                pot_chips: 0.0,
-                bet_chips: 0.0,
-                reward: if winners.contains(&ps.player) {
-                    winner_reward
-                } else {
-                    -(ps.pot_chips + ps.bet_chips as f64)
-                },
-                active: false,
-                ..*ps
-            })
+            .filter(|p| p.pot_chips > 0.0)
+            .cloned()
             .collect();
+
+        if showdown_players.is_empty() {
+            self.final_state = true;
+            return;
+        }
+
+        let mut pot_levels: Vec<f64> = showdown_players.iter().map(|p| p.pot_chips).collect();
+        pot_levels.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        pot_levels.dedup();
+
+        let mut last_level = 0.0;
+
+        for &level in &pot_levels {
+            let pot_slice = level - last_level;
+            if pot_slice <= 1e-9 {
+                // Use epsilon for float comparison
+                continue;
+            }
+
+            let contributors: Vec<u64> = self
+                .players_state
+                .iter()
+                .filter(|p| p.pot_chips >= level)
+                .map(|p| p.player)
+                .collect();
+            let total_pot_for_slice = pot_slice * contributors.len() as f64;
+
+            let eligible_players: Vec<u64> = self
+                .players_state
+                .iter()
+                .filter(|p| p.active && p.pot_chips >= level)
+                .map(|p| p.player)
+                .collect();
+
+            let mut best_rank = (11, 0, 0);
+            let mut pot_winners: Vec<u64> = Vec::new();
+
+            for &player_id in &eligible_players {
+                let player_state = &self.players_state[player_id as usize];
+                let rank = rank_hand(self, player_state.hand, &self.public_cards);
+                verbose_println!(self, "DEBUG: Player {} hand rank: {:?}", player_id, rank);
+                if rank < best_rank {
+                    best_rank = rank;
+                    pot_winners = vec![player_id];
+                } else if rank == best_rank {
+                    pot_winners.push(player_id);
+                }
+            }
+
+            verbose_println!(
+                self,
+                "DEBUG: Pot slice {} (level {}): best_rank={:?}, winners={:?}, reward_per_winner={}",
+                pot_slice,
+                level,
+                best_rank,
+                pot_winners,
+                if !pot_winners.is_empty() { total_pot_for_slice / pot_winners.len() as f64 } else { 0.0 }
+            );
+
+            if !pot_winners.is_empty() {
+                let reward_per_winner = total_pot_for_slice / pot_winners.len() as f64;
+                for winner_id in &pot_winners {
+                    self.players_state[*winner_id as usize].reward += reward_per_winner;
+                }
+            }
+            last_level = level;
+        }
+
+        // Finalize rewards by subtracting initial investment
+        for p in &mut self.players_state {
+            p.reward -= p.pot_chips;
+        }
+
+        // Set all players to inactive since the game is over
+        for p in &mut self.players_state {
+            p.active = false;
+        }
 
         self.final_state = true;
     }
@@ -816,12 +896,7 @@ impl State {
             .map(|ps| PlayerState {
                 pot_chips: ps.pot_chips + ps.bet_chips,
                 bet_chips: 0.0,
-                // Keep last_stage_action for all-in players so they don't need to act again
-                last_stage_action: if ps.stake == 0.0 {
-                    ps.last_stage_action
-                } else {
-                    None
-                },
+                last_stage_action: None, // Reset for the new stage
                 ..*ps
             })
             .collect();
@@ -938,6 +1013,14 @@ fn legal_actions(state: &State) -> Vec<ActionEnum> {
     legal_actions
 }
 
+fn high_card_value(ranks: &Vec<CardRank>) -> u64 {
+    let mut value: u64 = 0;
+    for (i, &r) in ranks.iter().sorted().enumerate() {
+        value += (13_u64.pow(i as u32)) * (12 - r as u64);
+    }
+    value
+}
+
 // Modified to accept state parameter for verbose control
 fn rank_hand(
     _state: &State,
@@ -1052,14 +1135,6 @@ fn rank_card_combination(cards: Vec<Card>) -> (u64, u64, u64) {
 
     // 10. High Card: When you haven't made any of the hands above, the highest card plays.
     (10, high_card_value(&ranks), 0_u64)
-}
-
-fn high_card_value(ranks: &Vec<CardRank>) -> u64 {
-    let mut value: u64 = 0;
-    for (i, &r) in ranks.iter().sorted().enumerate() {
-        value += (13_u64.pow(i as u32)) * (12 - r as u64);
-    }
-    value
 }
 
 mod tests {
