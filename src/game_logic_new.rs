@@ -4,6 +4,7 @@ use pyo3::exceptions::PyOSError;
 use pyo3::prelude::*;
 use rand::{seq::SliceRandom, SeedableRng};
 use std::collections::HashSet;
+use strum::IntoEnumIterator;
 
 use crate::state::action::{Action, ActionEnum, ActionRecord};
 use crate::state::card::{Card, CardRank, CardSuit};
@@ -71,7 +72,7 @@ impl BettingRoundContext {
 }
 
 /// The State trait defining the contract for all game states
-pub trait GameStateInterface: GameStateInterfaceClone {
+pub trait GameStateInterface {
     fn apply_action(
         self: Box<Self>,
         state: &mut State,
@@ -81,26 +82,6 @@ pub trait GameStateInterface: GameStateInterfaceClone {
     fn get_legal_actions(&self, state: &State) -> Vec<ActionEnum>;
     fn state_name(&self) -> String;
     fn is_final(&self) -> bool;
-}
-
-// Helper trait to enable cloning of trait objects
-pub trait GameStateInterfaceClone {
-    fn clone_box(&self) -> Box<dyn GameStateInterface>;
-}
-
-impl<T> GameStateInterfaceClone for T
-where
-    T: 'static + GameStateInterface + Clone,
-{
-    fn clone_box(&self) -> Box<dyn GameStateInterface> {
-        Box::new(self.clone())
-    }
-}
-
-impl Clone for Box<dyn GameStateInterface> {
-    fn clone(&self) -> Box<dyn GameStateInterface> {
-        self.clone_box()
-    }
 }
 
 /// State for when we are awaiting a player's action
@@ -219,8 +200,7 @@ impl GameStateInterface for AwaitingAction {
     ) -> Result<Box<dyn GameStateInterface>, StateStatus> {
         // Validate the action comes from the correct player
         if state.current_player != self.player_to_act_idx {
-            // Update our internal player index to match the current state
-            self.player_to_act_idx = state.current_player;
+            return Err(StateStatus::IllegalAction);
         }
 
         // Make sure action is legal
@@ -355,8 +335,7 @@ impl GameStateInterface for AwaitingAction {
             return vec![];
         }
 
-        // Always use the state's current_player, not our internal player_to_act_idx
-        let player_state = &state.players_state[state.current_player as usize];
+        let player_state = &state.players_state[self.player_to_act_idx as usize];
 
         // If player is all-in, they cannot act
         if player_state.stake == 0.0 {
@@ -445,17 +424,8 @@ impl GameStateInterface for GameOver {
 }
 
 /// Internal FSM state holder
-#[derive(Clone)]
 struct StateMachine {
     pub current_state: Box<dyn GameStateInterface>,
-}
-
-impl std::fmt::Debug for StateMachine {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StateMachine")
-            .field("current_state", &self.current_state.state_name())
-            .finish()
-    }
 }
 
 impl StateMachine {
@@ -477,9 +447,8 @@ impl StateMachine {
                 Ok(())
             }
             Err(status) => {
-                // Create a new state for error recovery since we can't restore the moved state
-                // In case of error, we transition to GameOver to prevent further actions
-                self.current_state = Box::new(GameOver);
+                // Restore the old state on error
+                self.current_state = current_state;
                 Err(status)
             }
         }
@@ -589,14 +558,8 @@ impl State {
 
         players_state.sort_by_key(|ps| ps.player);
 
-        // Find first player to act (UTG) - depends on number of players
-        let first_player = if n_players == 2 {
-            // Heads-up: small blind acts first preflop
-            (button + 1) % n_players
-        } else {
-            // Multi-way: UTG (left of big blind) acts first
-            (button + 3) % n_players
-        };
+        // Find first player to act (UTG)
+        let first_player = (button + 3) % n_players;
 
         // Create betting round context
         let active_players = players_state.iter().filter(|ps| ps.active).count();
@@ -623,7 +586,6 @@ impl State {
             status: StateStatus::Ok,
             verbose: verbose,
             seed: seed,
-            fsm_state: "AwaitingAction".to_string(),
         };
 
         // Update range indices for all players
@@ -646,13 +608,6 @@ impl State {
             return self.clone();
         }
 
-        // If we're at showdown, no actions are allowed - handle showdown and finish
-        if self.stage == Stage::Showdown {
-            let mut new_state = self.clone();
-            new_state.handle_showdown();
-            return new_state;
-        }
-
         let mut new_state = self.clone();
 
         // Create FSM based on current state
@@ -666,17 +621,11 @@ impl State {
                     .iter()
                     .filter(|ps| ps.active)
                     .count();
-
-                // Calculate the current maximum bet to determine amount_to_call
-                let max_bet = new_state
-                    .players_state
-                    .iter()
-                    .filter(|ps| ps.active)
-                    .map(|ps| ps.bet_chips)
-                    .fold(0.0f64, f64::max);
-
-                let context =
-                    BettingRoundContext::new(max_bet, active_players, new_state.current_player);
+                let context = BettingRoundContext::new(
+                    new_state.min_bet,
+                    active_players,
+                    new_state.current_player,
+                );
                 Box::new(AwaitingAction::new(new_state.current_player, context))
             };
 
@@ -687,38 +636,10 @@ impl State {
                 // Check if we need to transition to next stage
                 if fsm.is_final() && !new_state.final_state {
                     new_state.advance_to_next_stage_or_showdown();
-
-                    // After advancing to next stage, create a new FSM for the new stage
-                    if !new_state.final_state && new_state.stage != Stage::Showdown {
-                        let active_players = new_state
-                            .players_state
-                            .iter()
-                            .filter(|ps| ps.active)
-                            .count();
-
-                        let max_bet = new_state
-                            .players_state
-                            .iter()
-                            .filter(|ps| ps.active)
-                            .map(|ps| ps.bet_chips)
-                            .fold(0.0f64, f64::max);
-
-                        let context = BettingRoundContext::new(
-                            max_bet,
-                            active_players,
-                            new_state.current_player,
-                        );
-                        let new_fsm_state =
-                            Box::new(AwaitingAction::new(new_state.current_player, context));
-                        let new_fsm = StateMachine::new(new_fsm_state);
-                        new_state.legal_actions = new_fsm.get_legal_actions(&new_state);
-                    } else {
-                        new_state.legal_actions = vec![];
-                    }
-                } else {
-                    // Update legal actions with current FSM
-                    new_state.legal_actions = fsm.get_legal_actions(&new_state);
                 }
+
+                // Update legal actions
+                new_state.legal_actions = fsm.get_legal_actions(&new_state);
                 new_state
             }
             Err(status) => {
@@ -750,12 +671,7 @@ impl State {
             Stage::Preflop => Stage::Flop,
             Stage::Flop => Stage::Turn,
             Stage::Turn => Stage::River,
-            Stage::River => {
-                // When we reach showdown, handle it immediately
-                self.stage = Stage::Showdown;
-                self.handle_showdown();
-                return;
-            }
+            Stage::River => Stage::Showdown,
             Stage::Showdown => {
                 self.handle_showdown();
                 return;
@@ -801,8 +717,7 @@ impl State {
         }
 
         // Find first player to act (left of button)
-        let first_player = (self.button + 1) % self.players_state.len() as u64;
-        self.current_player = first_player;
+        self.current_player = (self.button + 1) % self.players_state.len() as u64;
         let mut attempts = 0;
 
         while attempts < self.players_state.len() {
@@ -818,20 +733,7 @@ impl State {
         if attempts >= self.players_state.len() {
             verbose_println!(self, "DEBUG: No players can act, going to showdown");
             self.complete_to_showdown();
-            return;
         }
-
-        // Create new FSM for the new round
-        let active_players = self.players_state.iter().filter(|ps| ps.active).count();
-
-        // For new rounds (Flop, Turn, River), the amount_to_call should be 0
-        // since all bets were moved to pot_chips
-        let amount_to_call = 0.0;
-
-        let _context =
-            BettingRoundContext::new(amount_to_call, active_players, self.current_player);
-        // Update the state tracking string
-        self.fsm_state = "AwaitingAction".to_string();
     }
 
     /// Complete to showdown and handle final outcome
@@ -884,9 +786,6 @@ impl State {
             // Only one player left - they win everything
             if let Some(winner) = active_players.first() {
                 self.set_winners(vec![winner.player]);
-            } else {
-                // No active players - should not happen, but handle gracefully
-                self.final_state = true;
             }
         } else {
             // Multiple players - evaluate hands
@@ -911,9 +810,6 @@ impl State {
 
             self.set_winners(winners);
         }
-
-        // Ensure the game is marked as final after showdown
-        self.final_state = true;
     }
 
     /// Set winners and calculate rewards
@@ -929,19 +825,17 @@ impl State {
         // Calculate and distribute rewards using side pot logic
         resolve_pots(self, &winners);
 
-        // Set all players to inactive and mark game as final
+        // Set all players to inactive
         for p in &mut self.players_state {
             p.active = false;
         }
-
-        self.final_state = true;
 
         self.final_state = true;
     }
 }
 
 /// Resolve pots and distribute winnings
-pub fn resolve_pots(state: &mut State, _winners: &[u64]) {
+pub fn resolve_pots(state: &mut State, winners: &[u64]) {
     // Initialize rewards to zero
     for p in &mut state.players_state {
         p.reward = 0.0;

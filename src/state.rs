@@ -63,6 +63,9 @@ pub struct State {
 
     #[pyo3(get, set)]
     pub seed: u64,
+
+    // Internal state machine context (not exposed to Python directly)
+    pub fsm_state: String, // Store state machine state as string for serialization
 }
 
 #[pyclass]
