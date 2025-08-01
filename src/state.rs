@@ -8,6 +8,7 @@ pub mod stage;
 use action::{ActionEnum, ActionRecord};
 use card::Card;
 use stage::Stage;
+use std::collections::HashSet;
 
 #[pyclass]
 #[derive(Debug, Clone)]
@@ -66,6 +67,9 @@ pub struct State {
 
     // Internal state machine context (not exposed to Python directly)
     pub fsm_state: String, // Store state machine state as string for serialization
+
+    // Track players who have acted in the current betting round
+    pub players_acted_this_round: HashSet<u64>,
 }
 
 #[pyclass]

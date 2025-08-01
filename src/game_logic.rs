@@ -56,6 +56,7 @@ pub struct BettingRoundContext {
     pub actions_this_round: usize,
     pub players_in_round: usize,
     pub starting_player: u64,
+    pub player_acted: HashSet<u64>, // Track players who have acted
 }
 
 impl BettingRoundContext {
@@ -66,6 +67,7 @@ impl BettingRoundContext {
             actions_this_round: 0,
             players_in_round,
             starting_player,
+            player_acted: HashSet::new(),
         }
     }
 }
@@ -123,8 +125,19 @@ impl AwaitingAction {
         let active_players: Vec<&PlayerState> =
             state.players_state.iter().filter(|ps| ps.active).collect();
 
+        verbose_println!(
+            state,
+            "DEBUG is_round_over: active_players={}",
+            active_players.len()
+        );
+
         // Only one player left - round is over
         if active_players.len() <= 1 {
+            verbose_println!(
+                state,
+                "DEBUG is_round_over: only {} active players, round over",
+                active_players.len()
+            );
             return true;
         }
 
@@ -141,7 +154,18 @@ impl AwaitingAction {
         // Check if all players have acted since the last raise or are all-in
         let all_have_acted_or_allin = active_players
             .iter()
-            .all(|ps| ps.last_stage_action.is_some() || ps.stake == 0.0);
+            .all(|ps| state.players_acted_this_round.contains(&ps.player) || ps.stake == 0.0);
+
+        verbose_println!(
+            state,
+            "DEBUG is_round_over: all_have_acted_or_allin={}",
+            all_have_acted_or_allin
+        );
+        verbose_println!(
+            state,
+            "DEBUG is_round_over: player_acted={:?}",
+            state.players_acted_this_round
+        );
 
         // Check if there are any players who can still act and need to call
         let max_bet = active_players
@@ -149,29 +173,64 @@ impl AwaitingAction {
             .map(|ps| ps.bet_chips)
             .fold(0.0f64, f64::max);
 
+        verbose_println!(state, "DEBUG is_round_over: max_bet={}", max_bet);
+
         // Check if any player still needs to act
         let players_need_to_act = if max_bet > 0.0 {
             // If there are bets on the table, players need to act if they haven't matched the max bet
-            active_players
+            let needs_to_act = active_players
                 .iter()
-                .any(|ps| ps.stake > 0.0 && ps.bet_chips < max_bet)
+                .any(|ps| ps.stake > 0.0 && ps.bet_chips < max_bet);
+            verbose_println!(
+                state,
+                "DEBUG is_round_over: players_need_to_act (bet case)={}",
+                needs_to_act
+            );
+            needs_to_act
         } else {
             // If no bets yet, players need to act if they haven't acted this round
-            active_players
+            let needs_to_act = active_players
                 .iter()
-                .any(|ps| ps.stake > 0.0 && ps.last_stage_action.is_none())
+                .any(|ps| ps.stake > 0.0 && !state.players_acted_this_round.contains(&ps.player));
+            verbose_println!(
+                state,
+                "DEBUG is_round_over: players_need_to_act (no bet case)={}",
+                needs_to_act
+            );
+            needs_to_act
         };
 
         // Special case for preflop big blind option
         let preflop_complete = if state.stage == Stage::Preflop {
-            let bb_position = (state.button + 2) % state.players_state.len() as u64;
+            let bb_position = if state.players_state.len() == 2 {
+                // In heads-up, big blind is at (button + 1)
+                (state.button + 1) % state.players_state.len() as u64
+            } else {
+                // In multi-way, big blind is at (button + 2)
+                (state.button + 2) % state.players_state.len() as u64
+            };
             let bb_player = &state.players_state[bb_position as usize];
-            !bb_player.active || bb_player.last_stage_action.is_some()
+            let complete =
+                !bb_player.active || state.players_acted_this_round.contains(&bb_player.player);
+            verbose_println!(
+                state,
+                "DEBUG is_round_over: preflop_complete={}, bb_position={}, bb_acted={}",
+                complete,
+                bb_position,
+                state.players_acted_this_round.contains(&bb_player.player)
+            );
+            complete
         } else {
+            verbose_println!(
+                state,
+                "DEBUG is_round_over: not preflop, preflop_complete=true"
+            );
             true
         };
 
-        all_have_acted_or_allin && !players_need_to_act && preflop_complete
+        let result = all_have_acted_or_allin && !players_need_to_act && preflop_complete;
+        verbose_println!(state, "DEBUG is_round_over: final result={}", result);
+        result
     }
 
     /// Find the next active player who can act
@@ -334,6 +393,10 @@ impl GameStateInterface for AwaitingAction {
                 if state.players_state[player_idx].bet_chips > state.min_bet {
                     state.min_bet = state.players_state[player_idx].bet_chips;
                     self.context.last_raiser_idx = Some(self.player_to_act_idx);
+                    state.players_acted_this_round.clear(); // Clear actors on raise
+                    state
+                        .players_acted_this_round
+                        .insert(self.player_to_act_idx); // Re-add raiser
                     self.context.actions_this_round = 0; // Reset action count on raise
                 }
 
@@ -346,6 +409,15 @@ impl GameStateInterface for AwaitingAction {
 
         // Record the action
         state.players_state[player_idx].last_stage_action = Some(actual_action.action);
+        // Track that player has acted (only if not already tracked due to raise)
+        if !state
+            .players_acted_this_round
+            .contains(&self.player_to_act_idx)
+        {
+            state
+                .players_acted_this_round
+                .insert(self.player_to_act_idx);
+        }
         self.context.actions_this_round += 1;
 
         let action_record = ActionRecord {
@@ -660,6 +732,7 @@ impl State {
             verbose: verbose,
             seed: seed,
             fsm_state: "AwaitingAction".to_string(),
+            players_acted_this_round: HashSet::new(),
         };
 
         // Update range indices for all players
@@ -731,29 +804,13 @@ impl State {
                             .iter()
                             .filter(|ps| ps.active)
                             .count();
-
-                        let max_bet = new_state
-                            .players_state
-                            .iter()
-                            .filter(|ps| ps.active)
-                            .map(|ps| ps.bet_chips)
-                            .fold(0.0f64, f64::max);
-
-                        let context = BettingRoundContext::new(
-                            max_bet,
-                            active_players,
-                            new_state.current_player,
-                        );
+                        let context =
+                            BettingRoundContext::new(0.0, active_players, new_state.current_player);
                         let new_fsm_state =
                             Box::new(AwaitingAction::new(new_state.current_player, context));
                         let new_fsm = StateMachine::new(new_fsm_state);
                         new_state.legal_actions = new_fsm.get_legal_actions(&new_state);
-                    } else {
-                        new_state.legal_actions = vec![];
                     }
-                } else {
-                    // Update legal actions with current FSM
-                    new_state.legal_actions = fsm.get_legal_actions(&new_state);
                 }
                 new_state
             }
@@ -780,6 +837,9 @@ impl State {
             player_state.bet_chips = 0.0;
             player_state.last_stage_action = None; // Reset for new stage
         }
+
+        // Clear the players acted tracking for the new round
+        self.players_acted_this_round.clear();
 
         // Advance stage
         self.stage = match self.stage {
@@ -865,8 +925,10 @@ impl State {
         // since all bets were moved to pot_chips
         let amount_to_call = 0.0;
 
-        let _context =
-            BettingRoundContext::new(amount_to_call, active_players, self.current_player);
+        let context = BettingRoundContext::new(amount_to_call, active_players, self.current_player);
+        let new_fsm_state = Box::new(AwaitingAction::new(self.current_player, context));
+        let fsm = StateMachine::new(new_fsm_state);
+        self.legal_actions = fsm.get_legal_actions(self);
         // Update the state tracking string
         self.fsm_state = "AwaitingAction".to_string();
     }
