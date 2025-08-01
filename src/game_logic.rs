@@ -128,19 +128,39 @@ impl AwaitingAction {
             return true;
         }
 
+        // If too many actions have been taken this round, force round end to prevent infinite loops
+        if self.context.actions_this_round > active_players.len() * 10 {
+            verbose_println!(
+                state,
+                "WARNING: Too many actions this round ({}), forcing round end",
+                self.context.actions_this_round
+            );
+            return true;
+        }
+
         // Check if all players have acted since the last raise or are all-in
         let all_have_acted_or_allin = active_players
             .iter()
             .all(|ps| ps.last_stage_action.is_some() || ps.stake == 0.0);
 
-        // Check if all bets are equal or players are all-in
+        // Check if there are any players who can still act and need to call
         let max_bet = active_players
             .iter()
             .map(|ps| ps.bet_chips)
             .fold(0.0f64, f64::max);
-        let all_bets_equal = active_players
-            .iter()
-            .all(|ps| ps.bet_chips == max_bet || ps.stake == 0.0);
+
+        // Check if any player still needs to act
+        let players_need_to_act = if max_bet > 0.0 {
+            // If there are bets on the table, players need to act if they haven't matched the max bet
+            active_players
+                .iter()
+                .any(|ps| ps.stake > 0.0 && ps.bet_chips < max_bet)
+        } else {
+            // If no bets yet, players need to act if they haven't acted this round
+            active_players
+                .iter()
+                .any(|ps| ps.stake > 0.0 && ps.last_stage_action.is_none())
+        };
 
         // Special case for preflop big blind option
         let preflop_complete = if state.stage == Stage::Preflop {
@@ -151,11 +171,16 @@ impl AwaitingAction {
             true
         };
 
-        all_have_acted_or_allin && all_bets_equal && preflop_complete
+        all_have_acted_or_allin && !players_need_to_act && preflop_complete
     }
 
     /// Find the next active player who can act
     fn find_next_active_player(&self, state: &State, current_idx: u64) -> Option<u64> {
+        // Safety check: ensure we have players
+        if state.players_state.is_empty() {
+            return None;
+        }
+
         let mut next_player = (current_idx + 1) % state.players_state.len() as u64;
         let mut attempts = 0;
         let max_attempts = state.players_state.len();
@@ -331,6 +356,17 @@ impl GameStateInterface for AwaitingAction {
         };
         state.from_action = Some(action_record.clone());
         state.action_list.push(action_record);
+
+        // Safety check: if too many actions in total, force game end
+        if state.action_list.len() > 50 {
+            verbose_println!(
+                state,
+                "WARNING: Too many total actions ({}), forcing game end",
+                state.action_list.len()
+            );
+            state.final_state = true;
+            return Ok(Box::new(GameOver));
+        }
 
         // Check if round is over
         if self.is_round_over(state) {
@@ -794,7 +830,7 @@ impl State {
         if active_players.len() <= 1 || players_with_chips <= 1 {
             verbose_println!(
                 self,
-                "DEBUG: Forcing showdown - insufficient active players with chips"
+                "DEBUG: Not enough players to continue, going to showdown"
             );
             self.complete_to_showdown();
             return;
@@ -804,8 +840,9 @@ impl State {
         let first_player = (self.button + 1) % self.players_state.len() as u64;
         self.current_player = first_player;
         let mut attempts = 0;
+        let max_attempts = self.players_state.len();
 
-        while attempts < self.players_state.len() {
+        while attempts < max_attempts {
             let player_state = &self.players_state[self.current_player as usize];
             if player_state.active && player_state.stake > 0.0 {
                 break;
@@ -815,7 +852,7 @@ impl State {
             attempts += 1;
         }
 
-        if attempts >= self.players_state.len() {
+        if attempts >= max_attempts {
             verbose_println!(self, "DEBUG: No players can act, going to showdown");
             self.complete_to_showdown();
             return;
