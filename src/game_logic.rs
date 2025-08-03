@@ -125,83 +125,47 @@ impl AwaitingAction {
         let active_players: Vec<&PlayerState> =
             state.players_state.iter().filter(|ps| ps.active).collect();
 
-        verbose_println!(
-            state,
-            "DEBUG is_round_over: active_players={}",
-            active_players.len()
-        );
-
         // Only one player left - round is over
         if active_players.len() <= 1 {
-            verbose_println!(
-                state,
-                "DEBUG is_round_over: only {} active players, round over",
-                active_players.len()
-            );
             return true;
         }
 
         // If too many actions have been taken this round, force round end to prevent infinite loops
-        if self.context.actions_this_round > active_players.len() * 10 {
-            verbose_println!(
-                state,
-                "WARNING: Too many actions this round ({}), forcing round end",
-                self.context.actions_this_round
-            );
+        if self.context.actions_this_round > active_players.len() * 6 {
             return true;
         }
 
-        // Check if all players have acted since the last raise or are all-in
-        let all_have_acted_or_allin = active_players
-            .iter()
-            .all(|ps| state.players_acted_this_round.contains(&ps.player) || ps.stake == 0.0);
-
-        verbose_println!(
-            state,
-            "DEBUG is_round_over: all_have_acted_or_allin={}",
-            all_have_acted_or_allin
-        );
-        verbose_println!(
-            state,
-            "DEBUG is_round_over: player_acted={:?}",
-            state.players_acted_this_round
-        );
-
-        // Check if there are any players who can still act and need to call
+        // Find the maximum bet in this round
         let max_bet = active_players
             .iter()
             .map(|ps| ps.bet_chips)
             .fold(0.0f64, f64::max);
 
-        verbose_println!(state, "DEBUG is_round_over: max_bet={}", max_bet);
+        // Check how many players still need to act
+        let mut players_needing_action = 0;
 
-        // Check if any player still needs to act
-        let players_need_to_act = if max_bet > 0.0 {
-            // If there are bets on the table, players need to act if they haven't matched the max bet
-            let needs_to_act = active_players
-                .iter()
-                .any(|ps| ps.stake > 0.0 && ps.bet_chips < max_bet);
-            verbose_println!(
-                state,
-                "DEBUG is_round_over: players_need_to_act (bet case)={}",
-                needs_to_act
-            );
-            needs_to_act
-        } else {
-            // If no bets yet, players need to act if they haven't acted this round
-            let needs_to_act = active_players
-                .iter()
-                .any(|ps| ps.stake > 0.0 && !state.players_acted_this_round.contains(&ps.player));
-            verbose_println!(
-                state,
-                "DEBUG is_round_over: players_need_to_act (no bet case)={}",
-                needs_to_act
-            );
-            needs_to_act
-        };
+        for player in &active_players {
+            // Skip players who are all-in (no chips left)
+            if player.stake == 0.0 {
+                continue;
+            }
 
-        // Special case for preflop big blind option
-        let preflop_complete = if state.stage == Stage::Preflop {
+            // Check if player needs to match the current bet
+            let needs_to_call = player.bet_chips < max_bet;
+
+            // Check if player has acted this round
+            let has_acted = state.players_acted_this_round.contains(&player.player);
+
+            // Player needs to act if:
+            // 1. They need to call and haven't acted, OR
+            // 2. No bets yet and they haven't acted this round
+            if (needs_to_call && !has_acted) || (max_bet == 0.0 && !has_acted) {
+                players_needing_action += 1;
+            }
+        }
+
+        // Special case for preflop: big blind gets option to raise even if they've already posted
+        let preflop_bb_option = if state.stage == Stage::Preflop && max_bet == state.bb {
             let bb_position = if state.players_state.len() == 2 {
                 // In heads-up, big blind is at (button + 1)
                 (state.button + 1) % state.players_state.len() as u64
@@ -210,27 +174,17 @@ impl AwaitingAction {
                 (state.button + 2) % state.players_state.len() as u64
             };
             let bb_player = &state.players_state[bb_position as usize];
-            let complete =
-                !bb_player.active || state.players_acted_this_round.contains(&bb_player.player);
-            verbose_println!(
-                state,
-                "DEBUG is_round_over: preflop_complete={}, bb_position={}, bb_acted={}",
-                complete,
-                bb_position,
-                state.players_acted_this_round.contains(&bb_player.player)
-            );
-            complete
+
+            // BB still has option if they're active, have chips, and haven't acted this round
+            bb_player.active
+                && bb_player.stake > 0.0
+                && !state.players_acted_this_round.contains(&bb_player.player)
         } else {
-            verbose_println!(
-                state,
-                "DEBUG is_round_over: not preflop, preflop_complete=true"
-            );
-            true
+            false
         };
 
-        let result = all_have_acted_or_allin && !players_need_to_act && preflop_complete;
-        verbose_println!(state, "DEBUG is_round_over: final result={}", result);
-        result
+        // Round is over if no players need to act and BB doesn't have option
+        players_needing_action == 0 && !preflop_bb_option
     }
 
     /// Find the next active player who can act
@@ -240,23 +194,42 @@ impl AwaitingAction {
             return None;
         }
 
-        let mut next_player = (current_idx + 1) % state.players_state.len() as u64;
-        let mut attempts = 0;
-        let max_attempts = state.players_state.len();
+        let active_players_with_chips: Vec<u64> = state
+            .players_state
+            .iter()
+            .filter(|p| p.active && p.stake > 0.0)
+            .map(|p| p.player)
+            .collect();
 
-        while attempts < max_attempts {
-            let player_state = &state.players_state[next_player as usize];
-
-            // Player can act if they are active and have chips to bet
-            if player_state.active && player_state.stake > 0.0 {
-                return Some(next_player);
-            }
-
-            next_player = (next_player + 1) % state.players_state.len() as u64;
-            attempts += 1;
+        if active_players_with_chips.is_empty() {
+            // No active players with chips left - game should end
+            return None;
         }
 
-        None // No eligible player found
+        // If only one player with chips, and it's the current player, no next player
+        if active_players_with_chips.len() == 1 && active_players_with_chips[0] == current_idx {
+            return None;
+        }
+
+        // Sort active players to ensure we follow proper table order
+        let mut sorted_active_players = active_players_with_chips;
+        sorted_active_players.sort();
+
+        // Find the first active player after the current one
+        if let Some(next_player) = sorted_active_players.iter().find(|&&p| p > current_idx) {
+            return Some(*next_player);
+        }
+
+        // If no player is found after the current one, wrap around to the first active player
+        // But make sure it's not the same as current player
+        if let Some(&first_player) = sorted_active_players.first() {
+            if first_player != current_idx {
+                return Some(first_player);
+            }
+        }
+
+        // If we reach here, either no valid next player exists or only current player is active
+        None
     }
 
     /// Validate that an action is legal
@@ -307,6 +280,19 @@ impl GameStateInterface for AwaitingAction {
             self.player_to_act_idx = state.current_player;
         }
 
+        // Safety check: ensure the current player can actually act
+        let current_player_state = &state.players_state[self.player_to_act_idx as usize];
+        if !current_player_state.active || current_player_state.stake == 0.0 {
+            verbose_println!(
+                state,
+                "DEBUG: Current player {} cannot act (active: {}, stake: {})",
+                self.player_to_act_idx,
+                current_player_state.active,
+                current_player_state.stake
+            );
+            return Ok(Box::new(RoundOver::new()));
+        }
+
         // Make sure action is legal
         let actual_action = self.make_action_legal(state, action);
         let player_idx = self.player_to_act_idx as usize;
@@ -329,6 +315,13 @@ impl GameStateInterface for AwaitingAction {
                 state.players_state[player_idx].bet_chips = 0.0;
                 state.players_state[player_idx].reward =
                     -(state.players_state[player_idx].pot_chips);
+
+                // If only one player remains active, the round is over
+                let active_players_count = state.players_state.iter().filter(|p| p.active).count();
+                if active_players_count <= 1 {
+                    // We can short-circuit and end the round immediately
+                    return Ok(Box::new(RoundOver::new()));
+                }
             }
 
             ActionEnum::CheckCall => {
@@ -452,9 +445,10 @@ impl GameStateInterface for AwaitingAction {
             self.player_to_act_idx = next_player_idx;
             Ok(self)
         } else {
-            // No more players can act - round is over
-            verbose_println!(state, "DEBUG: No more players can act, round over");
-            Ok(Box::new(RoundOver::new()))
+            // No more players can act - either no active players or all are all-in
+            verbose_println!(state, "DEBUG: No more players can act, game ending");
+            state.final_state = true;
+            Ok(Box::new(GameOver))
         }
     }
 
