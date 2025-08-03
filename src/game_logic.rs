@@ -53,6 +53,7 @@ impl Pot {
 pub struct BettingRoundContext {
     pub amount_to_call: f64,
     pub last_raiser_idx: Option<u64>,
+    pub last_raise_amount: f64, // Track the size of the last raise increment
     pub actions_this_round: usize,
     pub players_in_round: usize,
     pub starting_player: u64,
@@ -64,6 +65,7 @@ impl BettingRoundContext {
         BettingRoundContext {
             amount_to_call,
             last_raiser_idx: None,
+            last_raise_amount: 0.0,
             actions_this_round: 0,
             players_in_round,
             starting_player,
@@ -125,11 +127,6 @@ impl AwaitingAction {
         let active_players: Vec<&PlayerState> =
             state.players_state.iter().filter(|ps| ps.active).collect();
 
-        // Only one player left - round is over
-        if active_players.len() <= 1 {
-            return true;
-        }
-
         // If too many actions have been taken this round, force round end to prevent infinite loops
         if self.context.actions_this_round > active_players.len() * 6 {
             return true;
@@ -140,6 +137,66 @@ impl AwaitingAction {
             .iter()
             .map(|ps| ps.bet_chips)
             .fold(0.0f64, f64::max);
+
+        // Special handling for preflop big blind option
+        if state.stage == Stage::Preflop {
+            let bb_position = if state.players_state.len() == 2 {
+                // In heads-up, big blind is at (button + 1)
+                (state.button + 1) % state.players_state.len() as u64
+            } else {
+                // In multi-way, big blind is at (button + 2)
+                (state.button + 2) % state.players_state.len() as u64
+            };
+            let bb_player = &state.players_state[bb_position as usize];
+
+            // Check if BB is the only one who hasn't acted and still needs to act
+            if bb_player.active
+                && bb_player.stake > 0.0
+                && !state.players_acted_this_round.contains(&bb_player.player)
+            {
+                // Count how many other active players still need to act
+                let mut others_needing_action = 0;
+                for player in &active_players {
+                    if player.player != bb_player.player && player.stake > 0.0 {
+                        let needs_to_call = player.bet_chips < max_bet;
+                        let has_acted = state.players_acted_this_round.contains(&player.player);
+                        if (needs_to_call && !has_acted) || (max_bet == 0.0 && !has_acted) {
+                            others_needing_action += 1;
+                        }
+                    }
+                }
+
+                // If only BB needs to act
+                if others_needing_action == 0 {
+                    // Check if this is a situation where BB should get option
+                    if max_bet == state.bb {
+                        // Check if there's any money beyond the blinds (someone called)
+                        let total_pot: f64 = state
+                            .players_state
+                            .iter()
+                            .map(|ps| ps.pot_chips + ps.bet_chips)
+                            .sum();
+                        let blinds_total = state.sb + state.bb;
+
+                        if total_pot > blinds_total {
+                            // Someone called, BB gets option
+                            return false;
+                        } else {
+                            // Everyone folded, BB wins immediately
+                            return true;
+                        }
+                    } else if max_bet > state.bb {
+                        // Someone raised, BB gets option
+                        return false;
+                    }
+                }
+            }
+        }
+
+        // Only one player left - round is over (but this was already handled for BB option above)
+        if active_players.len() <= 1 {
+            return true;
+        }
 
         // Check how many players still need to act
         let mut players_needing_action = 0;
@@ -156,35 +213,18 @@ impl AwaitingAction {
             // Check if player has acted this round
             let has_acted = state.players_acted_this_round.contains(&player.player);
 
-            // Player needs to act if:
-            // 1. They need to call and haven't acted, OR
-            // 2. No bets yet and they haven't acted this round
-            if (needs_to_call && !has_acted) || (max_bet == 0.0 && !has_acted) {
+            // Player needs to act if they need to call and haven't acted yet
+            if needs_to_call && !has_acted {
+                players_needing_action += 1;
+            }
+            // Special case: if no betting has happened yet (max_bet == 0), all players who haven't acted need to
+            else if max_bet == 0.0 && !has_acted {
                 players_needing_action += 1;
             }
         }
 
-        // Special case for preflop: big blind gets option to raise even if they've already posted
-        let preflop_bb_option = if state.stage == Stage::Preflop && max_bet == state.bb {
-            let bb_position = if state.players_state.len() == 2 {
-                // In heads-up, big blind is at (button + 1)
-                (state.button + 1) % state.players_state.len() as u64
-            } else {
-                // In multi-way, big blind is at (button + 2)
-                (state.button + 2) % state.players_state.len() as u64
-            };
-            let bb_player = &state.players_state[bb_position as usize];
-
-            // BB still has option if they're active, have chips, and haven't acted this round
-            bb_player.active
-                && bb_player.stake > 0.0
-                && !state.players_acted_this_round.contains(&bb_player.player)
-        } else {
-            false
-        };
-
-        // Round is over if no players need to act and BB doesn't have option
-        players_needing_action == 0 && !preflop_bb_option
+        // Round is over if no players need to act
+        players_needing_action == 0
     }
 
     /// Find the next active player who can act
@@ -316,11 +356,34 @@ impl GameStateInterface for AwaitingAction {
                 state.players_state[player_idx].reward =
                     -(state.players_state[player_idx].pot_chips);
 
-                // If only one player remains active, the round is over
+                // Check if only one player remains active
                 let active_players_count = state.players_state.iter().filter(|p| p.active).count();
                 if active_players_count <= 1 {
-                    // We can short-circuit and end the round immediately
-                    return Ok(Box::new(RoundOver::new()));
+                    // Special case: in preflop, if only BB is left and they haven't acted,
+                    // they should get their option
+                    if state.stage == Stage::Preflop && active_players_count == 1 {
+                        let bb_position = if state.players_state.len() == 2 {
+                            (state.button + 1) % state.players_state.len() as u64
+                        } else {
+                            (state.button + 2) % state.players_state.len() as u64
+                        };
+
+                        let bb_player = &state.players_state[bb_position as usize];
+
+                        // If the remaining player is BB and they haven't acted, don't end round yet
+                        if bb_player.active
+                            && bb_player.stake > 0.0
+                            && !state.players_acted_this_round.contains(&bb_player.player)
+                        {
+                            // Don't short-circuit, let normal flow handle BB option
+                        } else {
+                            // BB has acted or is not the remaining player, end round
+                            return Ok(Box::new(RoundOver::new()));
+                        }
+                    } else {
+                        // Not preflop or no active players, end round
+                        return Ok(Box::new(RoundOver::new()));
+                    }
                 }
             }
 
@@ -365,12 +428,36 @@ impl GameStateInterface for AwaitingAction {
                 let current_player_bet = state.players_state[player_idx].bet_chips;
                 let player_stake = state.players_state[player_idx].stake;
 
+                // Find current maximum bet among all players
+                let max_bet = state
+                    .players_state
+                    .iter()
+                    .filter(|ps| ps.active)
+                    .map(|ps| ps.bet_chips)
+                    .fold(0.0f64, f64::max);
+
+                // Calculate minimum valid raise amount
+                let min_raise_amount = if max_bet > state.bb {
+                    // If there was a previous raise, must raise by at least the last raise amount
+                    self.context.last_raise_amount
+                } else {
+                    // First raise must be at least the big blind
+                    state.bb
+                };
+
+                let min_valid_bet = max_bet + min_raise_amount;
+
                 // Calculate actual bet amount
-                let actual_total_bet = if player_stake < state.min_bet || player_stake < 1.0 {
-                    // Go all-in if insufficient chips
+                let actual_total_bet = if player_stake < min_raise_amount || player_stake < 1.0 {
+                    // Go all-in if insufficient chips for minimum raise
                     current_player_bet + player_stake
-                } else if desired_total_bet < state.min_bet {
-                    state.min_bet.max(current_player_bet)
+                } else if desired_total_bet < min_valid_bet {
+                    // If desired bet is less than minimum, use minimum (or all-in if can't afford)
+                    if current_player_bet + player_stake >= min_valid_bet {
+                        min_valid_bet
+                    } else {
+                        current_player_bet + player_stake // All-in
+                    }
                 } else {
                     desired_total_bet
                 };
@@ -382,9 +469,12 @@ impl GameStateInterface for AwaitingAction {
                 state.players_state[player_idx].stake -= final_additional_chips;
                 state.pot += final_additional_chips;
 
-                // Update minimum bet if this is a valid raise
-                if state.players_state[player_idx].bet_chips > state.min_bet {
-                    state.min_bet = state.players_state[player_idx].bet_chips;
+                // Update minimum bet and raise tracking if this is a valid raise
+                let new_bet_amount = state.players_state[player_idx].bet_chips;
+                if new_bet_amount > max_bet {
+                    let raise_increment = new_bet_amount - max_bet;
+                    state.min_bet = new_bet_amount;
+                    self.context.last_raise_amount = raise_increment;
                     self.context.last_raiser_idx = Some(self.player_to_act_idx);
                     state.players_acted_this_round.clear(); // Clear actors on raise
                     state
@@ -702,7 +792,9 @@ impl State {
 
         // Create betting round context
         let active_players = players_state.iter().filter(|ps| ps.active).count();
-        let context = BettingRoundContext::new(bb, active_players, first_player);
+        let mut context = BettingRoundContext::new(bb, active_players, first_player);
+        // For preflop, set initial raise amount to big blind
+        context.last_raise_amount = bb;
 
         // Create initial FSM state
         let initial_fsm_state = Box::new(AwaitingAction::new(first_player, context));
@@ -778,8 +870,16 @@ impl State {
                     .map(|ps| ps.bet_chips)
                     .fold(0.0f64, f64::max);
 
-                let context =
+                let mut context =
                     BettingRoundContext::new(max_bet, active_players, new_state.current_player);
+                // Set appropriate last_raise_amount based on current state
+                context.last_raise_amount = if max_bet > new_state.bb {
+                    // Try to infer last raise amount from current state
+                    max_bet - new_state.bb
+                } else {
+                    new_state.bb
+                };
+
                 Box::new(AwaitingAction::new(new_state.current_player, context))
             };
 
@@ -798,8 +898,11 @@ impl State {
                             .iter()
                             .filter(|ps| ps.active)
                             .count();
-                        let context =
+                        let mut context =
                             BettingRoundContext::new(0.0, active_players, new_state.current_player);
+                        // For new betting rounds, first bet is considered as big blind size
+                        context.last_raise_amount = new_state.bb;
+
                         let new_fsm_state =
                             Box::new(AwaitingAction::new(new_state.current_player, context));
                         let new_fsm = StateMachine::new(new_fsm_state);
@@ -919,7 +1022,11 @@ impl State {
         // since all bets were moved to pot_chips
         let amount_to_call = 0.0;
 
-        let context = BettingRoundContext::new(amount_to_call, active_players, self.current_player);
+        let mut context =
+            BettingRoundContext::new(amount_to_call, active_players, self.current_player);
+        // Reset raise tracking for new round - first bet will be considered as big blind size
+        context.last_raise_amount = self.bb;
+
         let new_fsm_state = Box::new(AwaitingAction::new(self.current_player, context));
         let fsm = StateMachine::new(new_fsm_state);
         self.legal_actions = fsm.get_legal_actions(self);
@@ -1033,56 +1140,124 @@ impl State {
     }
 }
 
-/// Resolve pots and distribute winnings
+/// Resolve pots and distribute winnings using correct side pot algorithm
 pub fn resolve_pots(state: &mut State, _winners: &[u64]) {
+    verbose_println!(state, "DEBUG: Starting resolve_pots");
+
     // Initialize rewards to zero
     for p in &mut state.players_state {
         p.reward = 0.0;
     }
 
-    let showdown_players: Vec<_> = state
+    // All players who have pot_chips > 0 contributed to the pot
+    let contributing_players: Vec<_> = state
         .players_state
         .iter()
         .filter(|p| p.pot_chips > 0.0)
         .cloned()
         .collect();
 
-    if showdown_players.is_empty() {
+    verbose_println!(
+        state,
+        "DEBUG: Contributing players: {:?}",
+        contributing_players
+            .iter()
+            .map(|p| (p.player, p.pot_chips, p.active))
+            .collect::<Vec<_>>()
+    );
+
+    if contributing_players.is_empty() {
+        verbose_println!(state, "DEBUG: No contributing players, returning");
         return;
     }
 
-    let mut pot_levels: Vec<f64> = showdown_players.iter().map(|p| p.pot_chips).collect();
-    pot_levels.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    pot_levels.dedup();
+    verbose_println!(state, "DEBUG: Contributing players:");
+    for player in &contributing_players {
+        verbose_println!(
+            state,
+            "  Player {}: pot_chips={:.2}, active={}",
+            player.player,
+            player.pot_chips,
+            player.active
+        );
+    }
 
-    let mut last_level = 0.0;
+    // Get unique investment levels and sort them
+    let mut investment_levels: Vec<f64> =
+        contributing_players.iter().map(|p| p.pot_chips).collect();
+    investment_levels.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    investment_levels.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
 
-    for &level in &pot_levels {
-        let pot_slice = level - last_level;
-        if pot_slice <= 1e-9 {
+    verbose_println!(state, "DEBUG: Investment levels: {:?}", investment_levels);
+
+    // Create discrete pots
+    let mut pots: Vec<(f64, Vec<u64>)> = Vec::new(); // (pot_amount, eligible_players)
+    let mut previous_level = 0.0;
+
+    for &level in &investment_levels {
+        let contribution_per_player = level - previous_level;
+        if contribution_per_player <= 1e-9 {
             continue;
         }
 
-        let contributors: Vec<u64> = state
-            .players_state
+        // Find players who contributed to this pot level
+        let eligible_players: Vec<u64> = contributing_players
             .iter()
             .filter(|p| p.pot_chips >= level)
             .map(|p| p.player)
             .collect();
 
-        let total_pot_for_slice = pot_slice * contributors.len() as f64;
+        if !eligible_players.is_empty() {
+            let pot_amount = contribution_per_player * eligible_players.len() as f64;
 
-        let eligible_players: Vec<u64> = state
-            .players_state
-            .iter()
-            .filter(|p| p.active && p.pot_chips >= level)
-            .map(|p| p.player)
+            verbose_println!(state, "DEBUG: Creating pot - Level: {:.2}, Contribution: {:.2}, Eligible: {:?}, Amount: {:.2}",
+                           level, contribution_per_player, eligible_players, pot_amount);
+
+            pots.push((pot_amount, eligible_players));
+        }
+
+        previous_level = level;
+    }
+
+    verbose_println!(state, "DEBUG: Created {} pots", pots.len());
+
+    // Distribute winnings for each pot, starting from the smallest side pot
+    for (pot_amount, eligible_players) in pots.into_iter() {
+        if eligible_players.is_empty() {
+            continue;
+        }
+
+        // Find active players who are eligible for this pot
+        let active_eligible: Vec<u64> = eligible_players
+            .into_iter()
+            .filter(|&player_id| {
+                let player_state = &state.players_state[player_id as usize];
+                player_state.active // Only active players can win
+            })
             .collect();
 
-        let mut best_rank = (11, 0, 0);
+        if active_eligible.is_empty() {
+            // No active players eligible - this shouldn't happen in normal gameplay
+            verbose_println!(
+                state,
+                "DEBUG: No active players eligible for pot of {:.2}",
+                pot_amount
+            );
+            continue;
+        }
+
+        verbose_println!(
+            state,
+            "DEBUG: Processing pot of {:.2}, eligible active players: {:?}",
+            pot_amount,
+            active_eligible
+        );
+
+        // Determine winner(s) by comparing hands among eligible active players
+        let mut best_rank = (11, 0, 0); // Worst possible rank
         let mut pot_winners: Vec<u64> = Vec::new();
 
-        for &player_id in &eligible_players {
+        for &player_id in &active_eligible {
             let player_state = &state.players_state[player_id as usize];
             let rank = rank_hand(state, player_state.hand, &state.public_cards);
 
@@ -1094,20 +1269,121 @@ pub fn resolve_pots(state: &mut State, _winners: &[u64]) {
             }
         }
 
+        verbose_println!(
+            state,
+            "DEBUG: Pot winners: {:?}, best rank: {:?}",
+            pot_winners,
+            best_rank
+        );
+
+        // Distribute pot among winners
         if !pot_winners.is_empty() {
-            let reward_per_winner = total_pot_for_slice / pot_winners.len() as f64;
+            let reward_per_winner = pot_amount / pot_winners.len() as f64;
+
+            verbose_println!(
+                state,
+                "DEBUG: Distributing {:.2} to each of {} winners",
+                reward_per_winner,
+                pot_winners.len()
+            );
+
             for &winner_id in &pot_winners {
                 state.players_state[winner_id as usize].reward += reward_per_winner;
+                verbose_println!(
+                    state,
+                    "DEBUG: Player {} now has reward {:.2}",
+                    winner_id,
+                    state.players_state[winner_id as usize].reward
+                );
             }
         }
-
-        last_level = level;
     }
 
-    // Finalize rewards by subtracting initial investment
+    // Handle uncalled bets (return to players who bet more than anyone else called)
+    // This ONLY applies when some players folded AND there's no showdown
+    // If we reached showdown, all money should stay in the pot
+    let active_players_count = contributing_players
+        .iter()
+        .filter(|p| state.players_state[p.player as usize].active)
+        .count();
+
+    verbose_println!(
+        state,
+        "DEBUG: Active players: {}, Contributing players: {}",
+        active_players_count,
+        contributing_players.len()
+    );
+
+    // Only return uncalled bets if:
+    // 1. There are fewer active players than contributing players (someone folded)
+    // 2. We're not at showdown (meaning someone folded before showdown)
+    // 3. There are multiple investment levels
+    let at_showdown = state.stage == Stage::Showdown;
+
+    if investment_levels.len() >= 2
+        && active_players_count < contributing_players.len()
+        && !at_showdown
+    {
+        verbose_println!(state, "DEBUG: Processing uncalled bets (not at showdown)");
+        let max_called_amount = investment_levels[investment_levels.len() - 2];
+
+        for player in &contributing_players {
+            if player.pot_chips > max_called_amount {
+                let uncalled_amount = player.pot_chips - max_called_amount;
+                verbose_println!(
+                    state,
+                    "DEBUG: Returning uncalled {:.2} to player {}",
+                    uncalled_amount,
+                    player.player
+                );
+                state.players_state[player.player as usize].reward += uncalled_amount;
+            }
+        }
+    } else {
+        if at_showdown {
+            verbose_println!(state, "DEBUG: At showdown - no uncalled bets returned");
+        } else {
+            verbose_println!(state, "DEBUG: No uncalled bets to process");
+        }
+    }
+
+    // Calculate final rewards: rewards earned minus amount invested
+    verbose_println!(state, "DEBUG: Final reward calculation:");
+    let mut total_earned = 0.0;
+    let mut total_invested = 0.0;
+
     for p in &mut state.players_state {
-        p.reward -= p.pot_chips;
+        let earned = p.reward;
+        let invested = p.pot_chips;
+        total_earned += earned;
+        total_invested += invested;
+
+        verbose_println!(
+            state,
+            "DEBUG: Player {}: earned={:.2}, invested={:.2}",
+            p.player,
+            earned,
+            invested
+        );
+
+        p.reward -= p.pot_chips; // Subtract what they put in
+
+        verbose_println!(
+            state,
+            "DEBUG: Player {} final reward: {:.2}",
+            p.player,
+            p.reward
+        );
     }
+
+    let final_total: f64 = state.players_state.iter().map(|p| p.reward).sum();
+    verbose_println!(
+        state,
+        "DEBUG: Total earned: {:.2}, Total invested: {:.2}, Final sum: {:.6}",
+        total_earned,
+        total_invested,
+        final_total
+    );
 }
 
 /// Generate legal actions for the current state - fallback function
