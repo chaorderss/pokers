@@ -347,6 +347,9 @@ impl GameStateInterface for AwaitingAction {
         );
 
         // Apply the action's effects
+        let mut should_end_round = false;
+        let mut should_end_game = false;
+
         match actual_action.action {
             ActionEnum::Fold => {
                 state.players_state[player_idx].active = false;
@@ -378,11 +381,11 @@ impl GameStateInterface for AwaitingAction {
                             // Don't short-circuit, let normal flow handle BB option
                         } else {
                             // BB has acted or is not the remaining player, end round
-                            return Ok(Box::new(RoundOver::new()));
+                            should_end_round = true;
                         }
                     } else {
                         // Not preflop or no active players, end round
-                        return Ok(Box::new(RoundOver::new()));
+                        should_end_round = true;
                     }
                 }
             }
@@ -520,6 +523,17 @@ impl GameStateInterface for AwaitingAction {
                 state.action_list.len()
             );
             state.final_state = true;
+            should_end_game = true;
+        }
+
+        // Now handle early termination cases after recording the action
+        if should_end_round {
+            verbose_println!(state, "DEBUG: Round ending due to fold leaving one player");
+            return Ok(Box::new(RoundOver::new()));
+        }
+
+        if should_end_game {
+            verbose_println!(state, "DEBUG: Game ending due to too many actions");
             return Ok(Box::new(GameOver));
         }
 
