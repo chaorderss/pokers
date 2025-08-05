@@ -55,7 +55,7 @@ impl Pot {
 }
 
 /// The State trait defining the contract for all game states
-pub trait GameStateInterface: GameStateInterfaceClone {
+pub trait GameStateInterface: GameStateInterfaceClone + Send + Sync {
     fn apply_action(
         self: Box<Self>,
         state: &mut State,
@@ -68,7 +68,7 @@ pub trait GameStateInterface: GameStateInterfaceClone {
 }
 
 // Helper trait to enable cloning of trait objects
-pub trait GameStateInterfaceClone {
+pub trait GameStateInterfaceClone: Send + Sync {
     fn clone_box(&self) -> Box<dyn GameStateInterface>;
 }
 
@@ -488,7 +488,7 @@ impl GameStateInterface for GameOver {
 
 /// Internal FSM state holder
 #[derive(Clone)]
-struct StateMachine {
+pub struct StateMachine {
     pub current_state: Box<dyn GameStateInterface>,
 }
 
@@ -652,8 +652,10 @@ impl State {
             player_acted: HashSet::new(),
         };
 
-        // Create initial FSM state
-        let initial_fsm_state = Box::new(AwaitingAction::new(first_player, context.clone()));
+        let fsm = StateMachine::new(Box::new(AwaitingAction::new(
+            first_player,
+            context.clone(),
+        )));
 
         let mut state = State {
             current_player: first_player,
@@ -674,64 +676,58 @@ impl State {
             verbose: verbose,
             seed: seed,
             context,
+            fsm,
         };
 
         // Update range indices for all players
         state.update_range_indices();
 
         // Set legal actions from FSM
-        let fsm = StateMachine::new(initial_fsm_state);
-        state.legal_actions = fsm.get_legal_actions(&state);
+        state.legal_actions = state.fsm.get_legal_actions(&state);
 
         Ok(state)
     }
 
-    pub fn apply_action(&self, action: Action) -> State {
-        match self.status {
-            StateStatus::Ok => (),
-            _ => return self.clone(),
-        }
-
-        if self.final_state {
-            return self.clone();
-        }
-
+    pub fn apply_action(&mut self, action: Action) -> PyResult<()> {
         // If we're at showdown, no actions are allowed - handle showdown and finish
         if self.stage == Stage::Showdown {
-            let mut new_state = self.clone();
-            new_state.handle_showdown();
-            return new_state;
+            self.handle_showdown();
+            return Ok(());
         }
 
-        let mut new_state = self.clone();
+        // Temporarily take ownership of the FSM to avoid conflicting mutable borrows of `self`.
+        let mut fsm = std::mem::replace(&mut self.fsm, StateMachine::new(Box::new(GameOver)));
 
-        // Create FSM based on current state
-        let fsm_state: Box<dyn GameStateInterface> =
-            if new_state.stage == Stage::Showdown || new_state.final_state {
-                Box::new(GameOver)
-            } else {
-                let context = new_state.context.clone();
-                Box::new(AwaitingAction::new(new_state.current_player, context))
-            };
-
-        let mut fsm = StateMachine::new(fsm_state);
-
-        match fsm.apply_action(&mut new_state, action) {
+        // Now `fsm` is a separate variable, and we can pass `&mut self` to its methods.
+        match fsm.apply_action(self, action) {
             Ok(()) => {
-                // Check if we need to transition to next stage
-                if fsm.is_final() && !new_state.final_state {
-                    new_state.advance_to_next_stage_or_showdown();
-                } else if !new_state.final_state {
-                    // If round is not over, update legal actions for the current state
-                    new_state.legal_actions = fsm.get_legal_actions(&new_state);
+                if fsm.is_final() && !self.final_state {
+                    // The round has ended. Advance the game stage.
+                    // This function will set a new FSM for the new stage, so we don't put the old `fsm` back.
+                    self.advance_to_next_stage_or_showdown();
+                } else {
+                    // The round is not over. Update legal actions for the next player
+                    // and put the updated FSM back into the state.
+                    if !self.final_state {
+                        self.legal_actions = fsm.get_legal_actions(self);
+                    }
+                    self.fsm = fsm;
                 }
-                new_state
             }
             Err(status) => {
-                new_state.status = status;
-                new_state
+                self.status = status;
+                // On error, the FSM is now in a terminal state (GameOver).
+                // Put it back to prevent further actions.
+                self.fsm = fsm;
             }
         }
+
+        Ok(())
+    }
+
+    #[pyo3(name = "clone")]
+    pub fn py_clone(&self) -> Self {
+        self.clone()
     }
 
     pub fn __str__(&self) -> PyResult<String> {
@@ -743,6 +739,32 @@ impl State {
     /// Advance to the next stage or handle showdown
     fn advance_to_next_stage_or_showdown(&mut self) {
         verbose_println!(self, "DEBUG: Advancing from stage {:?}", self.stage);
+
+        // --- Return uncalled bets ---
+        // This happens at the end of a betting round, before chips are raked into the main pot.
+        let players_with_bets: Vec<_> = self
+            .players_state
+            .iter()
+            .filter(|p| p.bet_chips > 0.0)
+            .collect();
+
+        if players_with_bets.len() > 1 {
+            let mut bet_amounts: Vec<f64> = players_with_bets.iter().map(|p| p.bet_chips).collect();
+            bet_amounts.sort_by(|a, b| b.partial_cmp(a).unwrap()); // Sort descending
+
+            let highest_bet = bet_amounts[0];
+            let max_called_bet = bet_amounts[1]; // The second highest bet is the amount that was called
+
+            if highest_bet > max_called_bet {
+                // Find the player who made the uncalled bet
+                if let Some(player_to_refund) = self.players_state.iter_mut().find(|p| p.bet_chips == highest_bet) {
+                    let refund_amount = highest_bet - max_called_bet;
+                    verbose_println!(self, "DEBUG: Refunding uncalled bet of {:.2} to player {}", refund_amount, player_to_refund.player);
+                    player_to_refund.stake += refund_amount;
+                    player_to_refund.bet_chips -= refund_amount; // Adjust their bet down to the called amount
+                }
+            }
+        }
 
         // Move all bet_chips to pot_chips
         for player_state in &mut self.players_state {
@@ -843,11 +865,11 @@ impl State {
             player_acted: HashSet::new(),
         };
 
-        let fsm = StateMachine::new(Box::new(AwaitingAction::new(
+        self.fsm = StateMachine::new(Box::new(AwaitingAction::new(
             self.current_player,
             self.context.clone(),
         )));
-        self.legal_actions = fsm.get_legal_actions(self);
+        self.legal_actions = self.fsm.get_legal_actions(self);
     }
 
     /// Complete to showdown and handle final outcome
@@ -1280,7 +1302,7 @@ mod tests {
                         if state.final_state {
                             break;
                         }
-                        state = state.apply_action(*action);
+                        let _ = state.apply_action(*action);
                     }
                 }
                 Err(_) => {}
@@ -1297,7 +1319,7 @@ mod tests {
                         if state.final_state {
                             break;
                         }
-                        state = state.apply_action(action);
+                        let _ = state.apply_action(action);
                     }
                     let sum: f64 = state.players_state.iter().map(|ps| ps.reward).sum();
                     prop_assert!((sum).abs() < 1e-9);

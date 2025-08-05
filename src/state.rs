@@ -11,6 +11,7 @@ use proptest_derive::Arbitrary;
 use card::Card;
 use stage::Stage;
 use std::collections::HashSet;
+use crate::game_logic::StateMachine;
 
 /// Context for a single betting round
 #[pyclass]
@@ -42,7 +43,7 @@ impl BettingRoundContext {
 }
 
 #[pyclass]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 #[cfg_attr(test, derive(Arbitrary))]
 pub struct State {
     #[pyo3(get, set)]
@@ -98,6 +99,35 @@ pub struct State {
 
     #[pyo3(get, set)]
     pub context: BettingRoundContext,
+
+    // This field is for internal Rust logic, not exposed to Python
+    pub fsm: StateMachine,
+}
+
+impl Clone for State {
+    fn clone(&self) -> Self {
+        State {
+            current_player: self.current_player,
+            players_state: self.players_state.clone(),
+            public_cards: self.public_cards.clone(),
+            stage: self.stage,
+            button: self.button,
+            from_action: self.from_action.clone(),
+            action_list: self.action_list.clone(),
+            legal_actions: self.legal_actions.clone(),
+            deck: self.deck.clone(),
+            pot: self.pot,
+            min_bet: self.min_bet,
+            sb: self.sb,
+            bb: self.bb,
+            final_state: self.final_state,
+            status: self.status,
+            verbose: self.verbose,
+            seed: self.seed,
+            context: self.context.clone(),
+            fsm: self.fsm.clone(),
+        }
+    }
 }
 
 impl Default for BettingRoundContext {
