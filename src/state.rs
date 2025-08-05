@@ -6,9 +6,40 @@ pub mod action;
 pub mod card;
 pub mod stage;
 use action::{ActionEnum, ActionRecord};
+#[cfg(test)]
+use proptest_derive::Arbitrary;
 use card::Card;
 use stage::Stage;
 use std::collections::HashSet;
+
+/// Context for a single betting round
+#[pyclass]
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(Arbitrary))]
+pub struct BettingRoundContext {
+    #[pyo3(get, set)]
+    pub amount_to_call: f64,
+    #[pyo3(get, set)]
+    pub last_raiser_idx: Option<u64>,
+    #[pyo3(get, set)]
+    pub last_raise_amount: f64, // Track the size of the last raise increment
+    #[pyo3(get, set)]
+    pub actions_this_round: usize,
+    #[pyo3(get, set)]
+    pub players_in_round: usize,
+    #[pyo3(get, set)]
+    pub starting_player: u64,
+    #[pyo3(get, set)]
+    pub player_acted: HashSet<u64>, // Track players who have acted
+}
+
+#[pymethods]
+impl BettingRoundContext {
+    #[new]
+    pub fn new() -> Self {
+        BettingRoundContext::default()
+    }
+}
 
 #[pyclass]
 #[derive(Debug, Clone)]
@@ -65,11 +96,22 @@ pub struct State {
     #[pyo3(get, set)]
     pub seed: u64,
 
-    // Internal state machine context (not exposed to Python directly)
-    pub fsm_state: String, // Store state machine state as string for serialization
+    #[pyo3(get, set)]
+    pub context: BettingRoundContext,
+}
 
-    // Track players who have acted in the current betting round
-    pub players_acted_this_round: HashSet<u64>,
+impl Default for BettingRoundContext {
+    fn default() -> Self {
+        BettingRoundContext {
+            amount_to_call: 0.0,
+            last_raiser_idx: None,
+            last_raise_amount: 0.0,
+            actions_this_round: 0,
+            players_in_round: 0,
+            starting_player: 0,
+            player_acted: HashSet::new(),
+        }
+    }
 }
 
 #[pyclass]

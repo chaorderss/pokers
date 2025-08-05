@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use crate::state::action::{Action, ActionEnum, ActionRecord};
 use crate::state::card::{Card, CardRank, CardSuit};
-use crate::state::stage::Stage;
+use crate::state::{stage::Stage, BettingRoundContext};
 use crate::state::{PlayerState, State, StateStatus};
 
 // FFI binding to PokerHandEvaluator library
@@ -50,32 +50,6 @@ impl Pot {
         Pot {
             amount: 0.0,
             eligible_players: HashSet::new(),
-        }
-    }
-}
-
-/// Context for a single betting round
-#[derive(Debug, Clone)]
-pub struct BettingRoundContext {
-    pub amount_to_call: f64,
-    pub last_raiser_idx: Option<u64>,
-    pub last_raise_amount: f64, // Track the size of the last raise increment
-    pub actions_this_round: usize,
-    pub players_in_round: usize,
-    pub starting_player: u64,
-    pub player_acted: HashSet<u64>, // Track players who have acted
-}
-
-impl BettingRoundContext {
-    pub fn new(amount_to_call: f64, players_in_round: usize, starting_player: u64) -> Self {
-        BettingRoundContext {
-            amount_to_call,
-            last_raiser_idx: None,
-            last_raise_amount: 0.0,
-            actions_this_round: 0,
-            players_in_round,
-            starting_player,
-            player_acted: HashSet::new(),
         }
     }
 }
@@ -130,151 +104,63 @@ impl AwaitingAction {
 
     /// Check if the betting round has concluded
     fn is_round_over(&self, state: &State) -> bool {
-        let active_players: Vec<&PlayerState> =
-            state.players_state.iter().filter(|ps| ps.active).collect();
+        let active_players: Vec<_> = state.players_state.iter().filter(|ps| ps.active).collect();
 
-        // If too many actions have been taken this round, force round end to prevent infinite loops
-        if self.context.actions_this_round > active_players.len() * 6 {
-            return true;
-        }
-
-        // Find the maximum bet in this round
-        let max_bet = active_players
-            .iter()
-            .map(|ps| ps.bet_chips)
-            .fold(0.0f64, f64::max);
-
-        // Special handling for preflop big blind option
-        if state.stage == Stage::Preflop {
-            let bb_position = if state.players_state.len() == 2 {
-                // In heads-up, big blind is at (button + 1)
-                (state.button + 1) % state.players_state.len() as u64
-            } else {
-                // In multi-way, big blind is at (button + 2)
-                (state.button + 2) % state.players_state.len() as u64
-            };
-            let bb_player = &state.players_state[bb_position as usize];
-
-            // Check if BB is the only one who hasn't acted and still needs to act
-            if bb_player.active
-                && bb_player.stake > 0.0
-                && !state.players_acted_this_round.contains(&bb_player.player)
-            {
-                // Count how many other active players still need to act
-                let mut others_needing_action = 0;
-                for player in &active_players {
-                    if player.player != bb_player.player && player.stake > 0.0 {
-                        let needs_to_call = player.bet_chips < max_bet;
-                        let has_acted = state.players_acted_this_round.contains(&player.player);
-                        if (needs_to_call && !has_acted) || (max_bet == 0.0 && !has_acted) {
-                            others_needing_action += 1;
-                        }
-                    }
-                }
-
-                // If only BB needs to act
-                if others_needing_action == 0 {
-                    // Check if this is a situation where BB should get option
-                    if max_bet == state.bb {
-                        // Check if there's any money beyond the blinds (someone called)
-                        let total_pot: f64 = state
-                            .players_state
-                            .iter()
-                            .map(|ps| ps.pot_chips + ps.bet_chips)
-                            .sum();
-                        let blinds_total = state.sb + state.bb;
-
-                        if total_pot > blinds_total {
-                            // Someone called, BB gets option
-                            return false;
-                        } else {
-                            // Everyone folded, BB wins immediately
-                            return true;
-                        }
-                    } else if max_bet > state.bb {
-                        // Someone raised, BB gets option
-                        return false;
-                    }
-                }
-            }
-        }
-
-        // Only one player left - round is over (but this was already handled for BB option above)
         if active_players.len() <= 1 {
             return true;
         }
 
-        // Check how many players still need to act
-        let mut players_needing_action = 0;
-
-        for player in &active_players {
-            // Skip players who are all-in (no chips left)
-            if player.stake == 0.0 {
-                continue;
-            }
-
-            // Check if player needs to match the current bet
-            let needs_to_call = player.bet_chips < max_bet;
-
-            // Check if player has acted this round
-            let has_acted = state.players_acted_this_round.contains(&player.player);
-
-            // Player needs to act if they need to call and haven't acted yet
-            if needs_to_call && !has_acted {
-                players_needing_action += 1;
-            }
-            // Special case: if no betting has happened yet (max_bet == 0), all players who haven't acted need to
-            else if max_bet == 0.0 && !has_acted {
-                players_needing_action += 1;
-            }
+        // A round can end if only one or zero players have chips left to bet.
+        let players_with_chips_to_bet = active_players.iter().filter(|p| p.stake > 0.0).count();
+        if players_with_chips_to_bet <= 1 {
+            return true;
         }
 
-        // Round is over if no players need to act
-        players_needing_action == 0
+        // All players who are not all-in must have acted since the last raise.
+        let all_acted = active_players
+            .iter()
+            .all(|p| p.stake == 0.0 || state.context.player_acted.contains(&p.player));
+
+        if !all_acted {
+            return false;
+        }
+
+        // All players who are not all-in must have bet the same amount.
+        let max_bet = active_players
+            .iter()
+            .map(|ps| ps.bet_chips)
+            .fold(0.0f64, f64::max);
+        let all_bets_equal = active_players
+            .iter()
+            .all(|p| p.stake == 0.0 || p.bet_chips == max_bet);
+
+        all_bets_equal
     }
 
     /// Find the next active player who can act
     fn find_next_active_player(&self, state: &State, current_idx: u64) -> Option<u64> {
-        // Safety check: ensure we have players
-        if state.players_state.is_empty() {
+        let num_players = state.players_state.len() as u64;
+        if num_players == 0 {
             return None;
         }
 
-        let active_players_with_chips: Vec<u64> = state
-            .players_state
-            .iter()
-            .filter(|p| p.active && p.stake > 0.0)
-            .map(|p| p.player)
-            .collect();
-
-        if active_players_with_chips.is_empty() {
-            // No active players with chips left - game should end
-            return None;
-        }
-
-        // If only one player with chips, and it's the current player, no next player
-        if active_players_with_chips.len() == 1 && active_players_with_chips[0] == current_idx {
-            return None;
-        }
-
-        // Sort active players to ensure we follow proper table order
-        let mut sorted_active_players = active_players_with_chips;
-        sorted_active_players.sort();
-
-        // Find the first active player after the current one
-        if let Some(next_player) = sorted_active_players.iter().find(|&&p| p > current_idx) {
-            return Some(*next_player);
-        }
-
-        // If no player is found after the current one, wrap around to the first active player
-        // But make sure it's not the same as current player
-        if let Some(&first_player) = sorted_active_players.first() {
-            if first_player != current_idx {
-                return Some(first_player);
+        let mut next_player_idx = (current_idx + 1) % num_players;
+        // Loop at most once around the table to find the *next* player
+        for _ in 0..num_players {
+            if next_player_idx == current_idx {
+                // We've looped all the way around and are back at the current player.
+                // This can happen if only the current player is active and has chips.
+                // In this case, there is no "next" player.
+                break;
             }
+
+            let player_state = &state.players_state[next_player_idx as usize];
+            if player_state.active && player_state.stake > 0.0 {
+                return Some(next_player_idx);
+            }
+            next_player_idx = (next_player_idx + 1) % num_players;
         }
 
-        // If we reach here, either no valid next player exists or only current player is active
         None
     }
 
@@ -321,11 +207,6 @@ impl GameStateInterface for AwaitingAction {
         action: Action,
     ) -> Result<Box<dyn GameStateInterface>, StateStatus> {
         // Validate the action comes from the correct player
-        if state.current_player != self.player_to_act_idx {
-            // Update our internal player index to match the current state
-            self.player_to_act_idx = state.current_player;
-        }
-
         // Safety check: ensure the current player can actually act
         let current_player_state = &state.players_state[self.player_to_act_idx as usize];
         if !current_player_state.active || current_player_state.stake == 0.0 {
@@ -353,9 +234,6 @@ impl GameStateInterface for AwaitingAction {
         );
 
         // Apply the action's effects
-        let mut should_end_round = false;
-        let mut should_end_game = false;
-
         match actual_action.action {
             ActionEnum::Fold => {
                 state.players_state[player_idx].active = false;
@@ -364,36 +242,6 @@ impl GameStateInterface for AwaitingAction {
                 state.players_state[player_idx].bet_chips = 0.0;
                 state.players_state[player_idx].reward =
                     -(state.players_state[player_idx].pot_chips);
-
-                // Check if only one player remains active
-                let active_players_count = state.players_state.iter().filter(|p| p.active).count();
-                if active_players_count <= 1 {
-                    // Special case: in preflop, if only BB is left and they haven't acted,
-                    // they should get their option
-                    if state.stage == Stage::Preflop && active_players_count == 1 {
-                        let bb_position = if state.players_state.len() == 2 {
-                            (state.button + 1) % state.players_state.len() as u64
-                        } else {
-                            (state.button + 2) % state.players_state.len() as u64
-                        };
-
-                        let bb_player = &state.players_state[bb_position as usize];
-
-                        // If the remaining player is BB and they haven't acted, don't end round yet
-                        if bb_player.active
-                            && bb_player.stake > 0.0
-                            && !state.players_acted_this_round.contains(&bb_player.player)
-                        {
-                            // Don't short-circuit, let normal flow handle BB option
-                        } else {
-                            // BB has acted or is not the remaining player, end round
-                            should_end_round = true;
-                        }
-                    } else {
-                        // Not preflop or no active players, end round
-                        should_end_round = true;
-                    }
-                }
             }
 
             ActionEnum::CheckCall => {
@@ -447,7 +295,7 @@ impl GameStateInterface for AwaitingAction {
 
                 // Calculate minimum valid raise amount
                 let min_raise_amount = if max_bet > state.bb {
-                    // If there was a previous raise, must raise by at least the last raise amount
+                    // If there was a previous bet/raise, must raise by at least the last raise amount
                     self.context.last_raise_amount
                 } else {
                     // First raise must be at least the big blind
@@ -483,15 +331,12 @@ impl GameStateInterface for AwaitingAction {
                 if new_bet_amount > max_bet {
                     let raise_increment = new_bet_amount - max_bet;
                     state.min_bet = new_bet_amount;
-                    self.context.last_raise_amount = raise_increment;
-                    self.context.last_raiser_idx = Some(self.player_to_act_idx);
-                    state.players_acted_this_round.clear(); // Clear actors on raise
-                    state
-                        .players_acted_this_round
-                        .insert(self.player_to_act_idx); // Re-add raiser
-                    self.context.actions_this_round = 0; // Reset action count on raise
+                    state.context.last_raise_amount = raise_increment;
+                    state.context.last_raiser_idx = Some(self.player_to_act_idx);
+                    state.context.player_acted.clear(); // Clear actors on raise
+                    state.context.player_acted.insert(self.player_to_act_idx); // Re-add raiser
+                    state.context.actions_this_round = 0; // Reset action count on raise
                 }
-
                 final_action_for_record = Action::new(
                     ActionEnum::BetRaise,
                     state.players_state[player_idx].bet_chips,
@@ -501,16 +346,10 @@ impl GameStateInterface for AwaitingAction {
 
         // Record the action
         state.players_state[player_idx].last_stage_action = Some(actual_action.action);
-        // Track that player has acted (only if not already tracked due to raise)
-        if !state
-            .players_acted_this_round
-            .contains(&self.player_to_act_idx)
-        {
-            state
-                .players_acted_this_round
-                .insert(self.player_to_act_idx);
-        }
-        self.context.actions_this_round += 1;
+        // Track that player has acted
+        state.context.player_acted.insert(self.player_to_act_idx);
+
+        state.context.actions_this_round += 1;
 
         let action_record = ActionRecord {
             player: self.player_to_act_idx,
@@ -521,26 +360,18 @@ impl GameStateInterface for AwaitingAction {
         state.from_action = Some(action_record.clone());
         state.action_list.push(action_record);
 
-        // Safety check: if too many actions in total, force game end
-        if state.action_list.len() > 50 {
-            verbose_println!(
-                state,
-                "WARNING: Too many total actions ({}), forcing game end",
-                state.action_list.len()
-            );
-            state.final_state = true;
-            should_end_game = true;
-        }
-
-        // Now handle early termination cases after recording the action
-        if should_end_round {
-            verbose_println!(state, "DEBUG: Round ending due to fold leaving one player");
-            return Ok(Box::new(RoundOver::new()));
-        }
-
-        if should_end_game {
-            verbose_println!(state, "DEBUG: Game ending due to too many actions");
-            return Ok(Box::new(GameOver));
+        // If a player folded and they were the second to last active player, the game is over.
+        if actual_action.action == ActionEnum::Fold {
+            let active_players_count = state.players_state.iter().filter(|p| p.active).count();
+            if active_players_count <= 1 {
+                verbose_println!(
+                    state,
+                    "DEBUG: Game ending due to fold, only one player left."
+                );
+                // The game ends here. We transition to GameOver, and the main loop will
+                // call advance_to_next_stage_or_showdown to find the winner.
+                return Ok(Box::new(GameOver));
+            }
         }
 
         // Check if round is over
@@ -556,9 +387,8 @@ impl GameStateInterface for AwaitingAction {
             Ok(self)
         } else {
             // No more players can act - either no active players or all are all-in
-            verbose_println!(state, "DEBUG: No more players can act, game ending");
-            state.final_state = true;
-            Ok(Box::new(GameOver))
+            verbose_println!(state, "DEBUG: No more players can act, round over");
+            Ok(Box::new(RoundOver::new()))
         }
     }
 
@@ -812,12 +642,18 @@ impl State {
 
         // Create betting round context
         let active_players = players_state.iter().filter(|ps| ps.active).count();
-        let mut context = BettingRoundContext::new(bb, active_players, first_player);
-        // For preflop, set initial raise amount to big blind
-        context.last_raise_amount = bb;
+        let context = BettingRoundContext {
+            amount_to_call: bb,
+            last_raiser_idx: None,
+            last_raise_amount: bb, // Preflop, the first "raise" is the BB
+            actions_this_round: 0,
+            players_in_round: active_players,
+            starting_player: first_player,
+            player_acted: HashSet::new(),
+        };
 
         // Create initial FSM state
-        let initial_fsm_state = Box::new(AwaitingAction::new(first_player, context));
+        let initial_fsm_state = Box::new(AwaitingAction::new(first_player, context.clone()));
 
         let mut state = State {
             current_player: first_player,
@@ -837,8 +673,7 @@ impl State {
             status: StateStatus::Ok,
             verbose: verbose,
             seed: seed,
-            fsm_state: "AwaitingAction".to_string(),
-            players_acted_this_round: HashSet::new(),
+            context,
         };
 
         // Update range indices for all players
@@ -875,31 +710,7 @@ impl State {
             if new_state.stage == Stage::Showdown || new_state.final_state {
                 Box::new(GameOver)
             } else {
-                // Determine current betting round context
-                let active_players = new_state
-                    .players_state
-                    .iter()
-                    .filter(|ps| ps.active)
-                    .count();
-
-                // Calculate the current maximum bet to determine amount_to_call
-                let max_bet = new_state
-                    .players_state
-                    .iter()
-                    .filter(|ps| ps.active)
-                    .map(|ps| ps.bet_chips)
-                    .fold(0.0f64, f64::max);
-
-                let mut context =
-                    BettingRoundContext::new(max_bet, active_players, new_state.current_player);
-                // Set appropriate last_raise_amount based on current state
-                context.last_raise_amount = if max_bet > new_state.bb {
-                    // Try to infer last raise amount from current state
-                    max_bet - new_state.bb
-                } else {
-                    new_state.bb
-                };
-
+                let context = new_state.context.clone();
                 Box::new(AwaitingAction::new(new_state.current_player, context))
             };
 
@@ -910,24 +721,9 @@ impl State {
                 // Check if we need to transition to next stage
                 if fsm.is_final() && !new_state.final_state {
                     new_state.advance_to_next_stage_or_showdown();
-
-                    // After advancing to next stage, create a new FSM for the new stage
-                    if !new_state.final_state && new_state.stage != Stage::Showdown {
-                        let active_players = new_state
-                            .players_state
-                            .iter()
-                            .filter(|ps| ps.active)
-                            .count();
-                        let mut context =
-                            BettingRoundContext::new(0.0, active_players, new_state.current_player);
-                        // For new betting rounds, first bet is considered as big blind size
-                        context.last_raise_amount = new_state.bb;
-
-                        let new_fsm_state =
-                            Box::new(AwaitingAction::new(new_state.current_player, context));
-                        let new_fsm = StateMachine::new(new_fsm_state);
-                        new_state.legal_actions = new_fsm.get_legal_actions(&new_state);
-                    }
+                } else if !new_state.final_state {
+                    // If round is not over, update legal actions for the current state
+                    new_state.legal_actions = fsm.get_legal_actions(&new_state);
                 }
                 new_state
             }
@@ -956,7 +752,7 @@ impl State {
         }
 
         // Clear the players acted tracking for the new round
-        self.players_acted_this_round.clear();
+        self.context.player_acted.clear();
 
         // Advance stage
         self.stage = match self.stage {
@@ -1035,23 +831,23 @@ impl State {
             return;
         }
 
-        // Create new FSM for the new round
+        // Reset context for the new betting round
         let active_players = self.players_state.iter().filter(|ps| ps.active).count();
+        self.context = BettingRoundContext {
+            amount_to_call: 0.0, // No bet to call at the start of a new round
+            last_raiser_idx: None,
+            last_raise_amount: self.bb, // Minimum bet/raise is the big blind
+            actions_this_round: 0,
+            players_in_round: active_players,
+            starting_player: self.current_player,
+            player_acted: HashSet::new(),
+        };
 
-        // For new rounds (Flop, Turn, River), the amount_to_call should be 0
-        // since all bets were moved to pot_chips
-        let amount_to_call = 0.0;
-
-        let mut context =
-            BettingRoundContext::new(amount_to_call, active_players, self.current_player);
-        // Reset raise tracking for new round - first bet will be considered as big blind size
-        context.last_raise_amount = self.bb;
-
-        let new_fsm_state = Box::new(AwaitingAction::new(self.current_player, context));
-        let fsm = StateMachine::new(new_fsm_state);
+        let fsm = StateMachine::new(Box::new(AwaitingAction::new(
+            self.current_player,
+            self.context.clone(),
+        )));
         self.legal_actions = fsm.get_legal_actions(self);
-        // Update the state tracking string
-        self.fsm_state = "AwaitingAction".to_string();
     }
 
     /// Complete to showdown and handle final outcome
@@ -1154,7 +950,10 @@ impl State {
             p.active = false;
         }
 
-        self.final_state = true;
+        // Final check to ensure state is marked as final
+        if self.final_state == false {
+            self.final_state = true;
+        }
 
         self.final_state = true;
     }
@@ -1164,7 +963,7 @@ impl State {
 pub fn resolve_pots(state: &mut State, _winners: &[u64]) {
     verbose_println!(state, "DEBUG: Starting resolve_pots");
 
-    // Initialize rewards to zero
+    // CRITICAL FIX: Reset all player rewards to zero before calculating winnings for this hand.
     for p in &mut state.players_state {
         p.reward = 0.0;
     }
@@ -1176,15 +975,6 @@ pub fn resolve_pots(state: &mut State, _winners: &[u64]) {
         .filter(|p| p.pot_chips > 0.0)
         .cloned()
         .collect();
-
-    verbose_println!(
-        state,
-        "DEBUG: Contributing players: {:?}",
-        contributing_players
-            .iter()
-            .map(|p| (p.player, p.pot_chips, p.active))
-            .collect::<Vec<_>>()
-    );
 
     if contributing_players.is_empty() {
         verbose_println!(state, "DEBUG: No contributing players, returning");
@@ -1316,54 +1106,6 @@ pub fn resolve_pots(state: &mut State, _winners: &[u64]) {
                     state.players_state[winner_id as usize].reward
                 );
             }
-        }
-    }
-
-    // Handle uncalled bets (return to players who bet more than anyone else called)
-    // This ONLY applies when some players folded AND there's no showdown
-    // If we reached showdown, all money should stay in the pot
-    let active_players_count = contributing_players
-        .iter()
-        .filter(|p| state.players_state[p.player as usize].active)
-        .count();
-
-    verbose_println!(
-        state,
-        "DEBUG: Active players: {}, Contributing players: {}",
-        active_players_count,
-        contributing_players.len()
-    );
-
-    // Only return uncalled bets if:
-    // 1. There are fewer active players than contributing players (someone folded)
-    // 2. We're not at showdown (meaning someone folded before showdown)
-    // 3. There are multiple investment levels
-    let at_showdown = state.stage == Stage::Showdown;
-
-    if investment_levels.len() >= 2
-        && active_players_count < contributing_players.len()
-        && !at_showdown
-    {
-        verbose_println!(state, "DEBUG: Processing uncalled bets (not at showdown)");
-        let max_called_amount = investment_levels[investment_levels.len() - 2];
-
-        for player in &contributing_players {
-            if player.pot_chips > max_called_amount {
-                let uncalled_amount = player.pot_chips - max_called_amount;
-                verbose_println!(
-                    state,
-                    "DEBUG: Returning uncalled {:.2} to player {}",
-                    uncalled_amount,
-                    player.player
-                );
-                state.players_state[player.player as usize].reward += uncalled_amount;
-            }
-        }
-    } else {
-        if at_showdown {
-            verbose_println!(state, "DEBUG: At showdown - no uncalled bets returned");
-        } else {
-            verbose_println!(state, "DEBUG: No uncalled bets to process");
         }
     }
 

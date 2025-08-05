@@ -18,6 +18,7 @@ fn pokers(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<state::State>()?;
     m.add_class::<state::PlayerState>()?;
     m.add_class::<state::StateStatus>()?;
+    m.add_class::<state::BettingRoundContext>()?;
     m.add_class::<state::stage::Stage>()?;
     m.add_class::<state::action::ActionEnum>()?;
     m.add_class::<state::action::Action>()?;
