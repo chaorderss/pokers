@@ -10,6 +10,12 @@ use crate::state::card::{Card, CardRank, CardSuit};
 use crate::state::stage::Stage;
 use crate::state::{PlayerState, State, StateStatus};
 
+// FFI binding to PokerHandEvaluator library
+extern "C" {
+    fn evaluate_5cards(a: i32, b: i32, c: i32, d: i32, e: i32) -> i32;
+    fn evaluate_7cards(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32) -> i32;
+}
+
 // Define a macro for verbose printing controlled by environment variable
 macro_rules! verbose_println {
     ($state:expr, $($arg:tt)*) => {
@@ -1104,7 +1110,7 @@ impl State {
             }
         } else {
             // Multiple players - evaluate hands
-            let mut player_ranks: Vec<(u64, (u64, u64, u64))> = active_players
+            let mut player_ranks: Vec<(u64, u64)> = active_players
                 .iter()
                 .map(|ps| {
                     let rank = rank_hand(self, ps.hand, &self.public_cards);
@@ -1268,7 +1274,7 @@ pub fn resolve_pots(state: &mut State, _winners: &[u64]) {
         );
 
         // Determine winner(s) by comparing hands among eligible active players
-        let mut best_rank = (11, 0, 0); // Worst possible rank
+        let mut best_rank = 7463; // Worst possible rank
         let mut pot_winners: Vec<u64> = Vec::new();
 
         for &player_id in &active_eligible {
@@ -1427,127 +1433,92 @@ pub fn legal_actions(state: &State) -> Vec<ActionEnum> {
     legal_actions
 }
 
-fn high_card_value(ranks: &Vec<CardRank>) -> u64 {
-    let mut value: u64 = 0;
-    for (i, &r) in ranks.iter().sorted().enumerate() {
-        value += (13_u64.pow(i as u32)) * (12 - r as u64);
-    }
-    value
-}
-
-fn rank_hand(
-    _state: &State,
-    private_cards: (Card, Card),
-    public_cards: &Vec<Card>,
-) -> (u64, u64, u64) {
+fn rank_hand(_state: &State, private_cards: (Card, Card), public_cards: &Vec<Card>) -> u64 {
     let mut cards = public_cards.clone();
     cards.append(&mut vec![private_cards.0, private_cards.1]);
 
     // Check if we have enough cards for a valid combination
     if cards.len() < 5 {
         // Return worst possible rank if not enough cards
-        return (10, 0, 0);
+        return 7463; // Worse than phevaluator's worst rank (7462)
     }
 
+    // If we have exactly 7 cards, use phevaluator directly
+    if cards.len() == 7 {
+        let card_ints: Vec<i32> = cards.iter().map(|c| card_to_phevaluator_int(*c)).collect();
+        let rank = unsafe {
+            evaluate_7cards(
+                card_ints[0],
+                card_ints[1],
+                card_ints[2],
+                card_ints[3],
+                card_ints[4],
+                card_ints[5],
+                card_ints[6],
+            )
+        };
+
+        // Return phevaluator rank directly (1-7462, where 1 is best)
+        return rank as u64;
+    }
+
+    // For fewer than 7 cards, find the best 5-card combination using phevaluator
     let min_rank = cards
         .iter()
         .copied()
         .combinations(5)
-        .map(|comb| rank_card_combination(comb))
+        .map(|comb| {
+            if comb.len() == 5 {
+                let card_ints: Vec<i32> =
+                    comb.iter().map(|c| card_to_phevaluator_int(*c)).collect();
+                unsafe {
+                    evaluate_5cards(
+                        card_ints[0],
+                        card_ints[1],
+                        card_ints[2],
+                        card_ints[3],
+                        card_ints[4],
+                    ) as u64
+                }
+            } else {
+                7463 // Invalid combination
+            }
+        })
         .min()
-        .unwrap_or((10, 0, 0));
+        .unwrap_or(7463);
 
     min_rank
 }
 
-fn rank_card_combination(cards: Vec<Card>) -> (u64, u64, u64) {
-    let mut ordered_cards = cards.clone();
-    ordered_cards.sort_by_key(|c| c.rank);
-    let suits: Vec<CardSuit> = ordered_cards.iter().map(|c| c.suit).collect();
-    let ranks: Vec<CardRank> = ordered_cards.iter().map(|c| c.rank).collect();
+/// Convert a Card to phevaluator integer format
+/// phevaluator format: rank * 4 + suit
+/// where rank: 2=0, 3=1, ..., A=12
+/// and suit: C=0, D=1, H=2, S=3
+fn card_to_phevaluator_int(card: Card) -> i32 {
+    let rank_value = match card.rank {
+        CardRank::R2 => 0,
+        CardRank::R3 => 1,
+        CardRank::R4 => 2,
+        CardRank::R5 => 3,
+        CardRank::R6 => 4,
+        CardRank::R7 => 5,
+        CardRank::R8 => 6,
+        CardRank::R9 => 7,
+        CardRank::RT => 8,
+        CardRank::RJ => 9,
+        CardRank::RQ => 10,
+        CardRank::RK => 11,
+        CardRank::RA => 12,
+    };
 
-    let suit_duplicates: Vec<(usize, CardSuit)> = suits
-        .iter()
-        .copied()
-        .dedup_with_count()
-        .sorted_by_key(|(n, _)| n.clone())
-        .rev()
-        .collect();
+    let suit_value = match card.suit {
+        CardSuit::Clubs => 0,
+        CardSuit::Diamonds => 1,
+        CardSuit::Hearts => 2,
+        CardSuit::Spades => 3,
+    };
 
-    let rank_duplicates: Vec<(usize, CardRank)> = ranks
-        .iter()
-        .copied()
-        .dedup_with_count()
-        .sorted_by_key(|(n, _)| n.clone())
-        .rev()
-        .collect();
-
-    let ranks_in_sequence = ranks
-        .windows(2)
-        .map(|x| x[1] as i32 - x[0] as i32)
-        .all(|d| d == 1)
-        || ranks
-            == vec![
-                CardRank::R2,
-                CardRank::R3,
-                CardRank::R4,
-                CardRank::R5,
-                CardRank::RA,
-            ];
-
-    // Royal flush: A, K, Q, J, 10, all the same suit.
-    if ranks[..]
-        == [
-            CardRank::RT,
-            CardRank::RJ,
-            CardRank::RQ,
-            CardRank::RK,
-            CardRank::RA,
-        ]
-        && suit_duplicates[0].0 == 5
-    {
-        return (1, 0, 0_u64);
-    }
-    // Straight flush: Five cards in a sequence, all in the same suit.
-    if ranks_in_sequence && suit_duplicates[0].0 == 5 {
-        return (2, high_card_value(&ranks), 0_u64);
-    }
-    // Four of a kind: All four cards of the same rank.
-    if rank_duplicates[0].0 == 4 {
-        let relevant_ranks = vec![rank_duplicates[0].1];
-        return (3, high_card_value(&relevant_ranks), high_card_value(&ranks));
-    }
-    // Full house: Three of a kind with a pair.
-    if rank_duplicates[0].0 == 3 && rank_duplicates[1].0 == 2 {
-        let relevant_ranks = vec![rank_duplicates[0].1];
-        return (4, high_card_value(&relevant_ranks), high_card_value(&ranks));
-    }
-    // Flush: Any five cards of the same suit, but not in a sequence.
-    if suit_duplicates[0].0 == 5 {
-        return (5, high_card_value(&ranks), 0_u64);
-    }
-    // Straight: Five cards in a sequence, but not of the same suit.
-    if ranks_in_sequence {
-        return (6, high_card_value(&ranks), 0_u64);
-    }
-    // Three of a kind: Three cards of the same rank.
-    if rank_duplicates[0].0 == 3 {
-        let relevant_ranks = vec![rank_duplicates[0].1];
-        return (7, high_card_value(&relevant_ranks), high_card_value(&ranks));
-    }
-    // Two pair: Two different pairs.
-    if rank_duplicates[0].0 == 2 && rank_duplicates[1].0 == 2 {
-        let relevant_ranks = vec![rank_duplicates[0].1, rank_duplicates[1].1];
-        return (8, high_card_value(&relevant_ranks), high_card_value(&ranks));
-    }
-    // Pair: Two cards of the same rank.
-    if rank_duplicates[0].0 == 2 {
-        let relevant_ranks = vec![rank_duplicates[0].1];
-        return (9, high_card_value(&relevant_ranks), high_card_value(&ranks));
-    }
-
-    // High Card: When you haven't made any of the hands above, the highest card plays.
-    (10, high_card_value(&ranks), 0_u64)
+    rank_value * 4 + suit_value
 }
 
 mod tests {
