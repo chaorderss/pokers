@@ -10,6 +10,10 @@ use crate::state::card::{Card, CardRank, CardSuit};
 use crate::state::{stage::Stage, BettingRoundContext};
 use crate::state::{PlayerState, State, StateStatus};
 
+// Minimum stake threshold for players to be considered able to act
+// Players with stakes below this are treated as effectively all-in
+const MIN_STAKE_THRESHOLD: f64 = 0.1;
+
 // FFI binding to PokerHandEvaluator library
 extern "C" {
     fn evaluate_5cards(a: i32, b: i32, c: i32, d: i32, e: i32) -> i32;
@@ -91,15 +95,11 @@ impl Clone for Box<dyn GameStateInterface> {
 #[derive(Debug, Clone)]
 pub struct AwaitingAction {
     pub player_to_act_idx: u64,
-    pub context: BettingRoundContext,
 }
 
 impl AwaitingAction {
-    pub fn new(player_to_act_idx: u64, context: BettingRoundContext) -> Self {
-        AwaitingAction {
-            player_to_act_idx,
-            context,
-        }
+    pub fn new(player_to_act_idx: u64, _context: BettingRoundContext) -> Self {
+        AwaitingAction { player_to_act_idx }
     }
 
     /// Check if the betting round has concluded
@@ -110,16 +110,10 @@ impl AwaitingAction {
             return true;
         }
 
-        // A round can end if only one or zero players have chips left to bet.
-        let players_with_chips_to_bet = active_players.iter().filter(|p| p.stake > 0.0).count();
-        if players_with_chips_to_bet <= 1 {
-            return true;
-        }
-
         // All players who are not all-in must have acted since the last raise.
-        let all_acted = active_players
-            .iter()
-            .all(|p| p.stake == 0.0 || state.context.player_acted.contains(&p.player));
+        let all_acted = active_players.iter().all(|p| {
+            p.stake < MIN_STAKE_THRESHOLD || state.context.player_acted.contains(&p.player)
+        });
 
         if !all_acted {
             return false;
@@ -132,7 +126,7 @@ impl AwaitingAction {
             .fold(0.0f64, f64::max);
         let all_bets_equal = active_players
             .iter()
-            .all(|p| p.stake == 0.0 || p.bet_chips == max_bet);
+            .all(|p| p.stake < MIN_STAKE_THRESHOLD || p.bet_chips == max_bet);
 
         all_bets_equal
     }
@@ -155,7 +149,9 @@ impl AwaitingAction {
             }
 
             let player_state = &state.players_state[next_player_idx as usize];
-            if player_state.active && player_state.stake > 0.0 {
+            // Only consider players who are active and have meaningful chips to act
+            // Exclude players with very small stakes (< 0.1) as they are effectively all-in
+            if player_state.active && player_state.stake >= MIN_STAKE_THRESHOLD {
                 return Some(next_player_idx);
             }
             next_player_idx = (next_player_idx + 1) % num_players;
@@ -209,7 +205,7 @@ impl GameStateInterface for AwaitingAction {
         // Validate the action comes from the correct player
         // Safety check: ensure the current player can actually act
         let current_player_state = &state.players_state[self.player_to_act_idx as usize];
-        if !current_player_state.active || current_player_state.stake == 0.0 {
+        if !current_player_state.active || current_player_state.stake < MIN_STAKE_THRESHOLD {
             verbose_println!(
                 state,
                 "DEBUG: Current player {} cannot act (active: {}, stake: {})",
@@ -260,12 +256,8 @@ impl GameStateInterface for AwaitingAction {
                     let required_chips = max_bet - current_player_bet;
                     let player_stake = state.players_state[player_idx].stake;
 
-                    let actual_chips = if required_chips > player_stake {
-                        // Go all-in if can't match
-                        state.players_state[player_idx].stake = 0.0;
-                        player_stake
-                    } else if player_stake - required_chips < 1.0 {
-                        // Go all-in if would leave less than 1 chip
+                    let actual_chips = if required_chips >= player_stake {
+                        // Go all-in if can't match. Use >= to handle exact amount.
                         state.players_state[player_idx].stake = 0.0;
                         player_stake
                     } else {
@@ -296,17 +288,19 @@ impl GameStateInterface for AwaitingAction {
                 // Calculate minimum valid raise amount
                 let min_raise_amount = if max_bet > state.bb {
                     // If there was a previous bet/raise, must raise by at least the last raise amount
-                    self.context.last_raise_amount
+                    state.context.last_raise_amount
                 } else {
-                    // First raise must be at least the big blind
+                    // First raise preflop: must raise by at least the amount that would make it 2x BB
+                    // For example: BB=2, first raise minimum should be to 4 (raise by 2)
                     state.bb
                 };
 
                 let min_valid_bet = max_bet + min_raise_amount;
 
                 // Calculate actual bet amount
-                let actual_total_bet = if player_stake < min_raise_amount || player_stake < 1.0 {
-                    // Go all-in if insufficient chips for minimum raise
+                let actual_total_bet = if player_stake <= min_raise_amount {
+                    // Go all-in if insufficient chips for a minimum raise.
+                    // Use <= to handle cases where stake is exactly the min raise amount.
                     current_player_bet + player_stake
                 } else if desired_total_bet < min_valid_bet {
                     // If desired bet is less than minimum, use minimum (or all-in if can't afford)
@@ -329,6 +323,7 @@ impl GameStateInterface for AwaitingAction {
                 // Update minimum bet and raise tracking if this is a valid raise
                 let new_bet_amount = state.players_state[player_idx].bet_chips;
                 if new_bet_amount > max_bet {
+                    // Calculate the actual raise increment: new bet amount - previous max bet
                     let raise_increment = new_bet_amount - max_bet;
                     state.min_bet = new_bet_amount;
                     state.context.last_raise_amount = raise_increment;
@@ -359,6 +354,67 @@ impl GameStateInterface for AwaitingAction {
         };
         state.from_action = Some(action_record.clone());
         state.action_list.push(action_record);
+
+        // DEBUG: Monitor for excessive actions that could indicate infinite loops
+        if state.action_list.len() > 49 {
+            eprintln!(
+                "WARNING: Action list length exceeded 49 (current: {}). Possible infinite loop detected!",
+                state.action_list.len()
+            );
+            eprintln!("DEBUG: Current game state:");
+            eprintln!("  Stage: {:?}", state.stage);
+            eprintln!("  Current player: {}", state.current_player);
+            eprintln!("  Player to act: {}", self.player_to_act_idx);
+            eprintln!("  Final state: {}", state.final_state);
+
+            eprintln!("DEBUG: Player states:");
+            for (i, ps) in state.players_state.iter().enumerate() {
+                let total_chips = ps.stake + ps.bet_chips + ps.pot_chips;
+                eprintln!(
+                    "    Player {}: active={}, stake={:.2}, bet_chips={:.2}, pot_chips={:.2}, total={:.2}",
+                    i, ps.active, ps.stake, ps.bet_chips, ps.pot_chips, total_chips
+                );
+            }
+
+            eprintln!("DEBUG: Last 10 actions:");
+            let start_idx = state.action_list.len().saturating_sub(10);
+            for (i, action) in state.action_list[start_idx..].iter().enumerate() {
+                eprintln!(
+                    "    {}: Player {} {:?} amount={:.2} stage={:?}",
+                    start_idx + i,
+                    action.player,
+                    action.action.action,
+                    action.action.amount,
+                    action.stage
+                );
+            }
+
+            eprintln!("DEBUG: Round context:");
+            eprintln!("  Actions this round: {}", state.context.actions_this_round);
+            eprintln!("  Players acted: {:?}", state.context.player_acted);
+            eprintln!("  Amount to call: {:.2}", state.context.amount_to_call);
+            eprintln!("  Last raiser: {:?}", state.context.last_raiser_idx);
+
+            // Check round over condition
+            let is_round_over = self.is_round_over(state);
+            eprintln!("DEBUG: Is round over: {}", is_round_over);
+
+            // Check next player availability
+            let next_player = self.find_next_active_player(state, self.player_to_act_idx);
+            eprintln!("DEBUG: Next active player: {:?}", next_player);
+
+            // Count active players with sufficient chips
+            let active_players_count = state.players_state.iter().filter(|p| p.active).count();
+            let players_with_chips = state
+                .players_state
+                .iter()
+                .filter(|p| p.active && p.stake >= MIN_STAKE_THRESHOLD)
+                .count();
+            eprintln!(
+                "DEBUG: Active players: {}, Players with chips (>= {:.1}): {}",
+                active_players_count, MIN_STAKE_THRESHOLD, players_with_chips
+            );
+        }
 
         // If a player folded and they were the second to last active player, the game is over.
         if actual_action.action == ActionEnum::Fold {
@@ -400,8 +456,8 @@ impl GameStateInterface for AwaitingAction {
         // Always use the state's current_player, not our internal player_to_act_idx
         let player_state = &state.players_state[state.current_player as usize];
 
-        // If player is all-in, they cannot act
-        if player_state.stake == 0.0 {
+        // If player is all-in or has insufficient chips to act meaningfully, they cannot act
+        if player_state.stake < MIN_STAKE_THRESHOLD {
             return vec![];
         }
 
@@ -411,7 +467,7 @@ impl GameStateInterface for AwaitingAction {
         legal_actions.push(ActionEnum::CheckCall);
 
         // Allow BetRaise if player has chips to bet
-        if player_state.stake > 0.0 {
+        if player_state.stake >= MIN_STAKE_THRESHOLD {
             legal_actions.push(ActionEnum::BetRaise);
         }
 
@@ -652,10 +708,7 @@ impl State {
             player_acted: HashSet::new(),
         };
 
-        let fsm = StateMachine::new(Box::new(AwaitingAction::new(
-            first_player,
-            context.clone(),
-        )));
+        let fsm = StateMachine::new(Box::new(AwaitingAction::new(first_player, context.clone())));
 
         let mut state = State {
             current_player: first_player,
@@ -691,7 +744,9 @@ impl State {
     pub fn apply_action(&mut self, action: Action) -> PyResult<()> {
         // If we're at showdown, no actions are allowed - handle showdown and finish
         if self.stage == Stage::Showdown {
-            self.handle_showdown();
+            if !self.final_state {
+                self.handle_showdown();
+            }
             return Ok(());
         }
 
@@ -710,6 +765,9 @@ impl State {
                     // and put the updated FSM back into the state.
                     if !self.final_state {
                         self.legal_actions = fsm.get_legal_actions(self);
+                    } else {
+                        // Game is final, no legal actions
+                        self.legal_actions = vec![];
                     }
                     self.fsm = fsm;
                 }
@@ -757,9 +815,18 @@ impl State {
 
             if highest_bet > max_called_bet {
                 // Find the player who made the uncalled bet
-                if let Some(player_to_refund) = self.players_state.iter_mut().find(|p| p.bet_chips == highest_bet) {
+                if let Some(player_to_refund) = self
+                    .players_state
+                    .iter_mut()
+                    .find(|p| p.bet_chips == highest_bet)
+                {
                     let refund_amount = highest_bet - max_called_bet;
-                    verbose_println!(self, "DEBUG: Refunding uncalled bet of {:.2} to player {}", refund_amount, player_to_refund.player);
+                    verbose_println!(
+                        self,
+                        "DEBUG: Refunding uncalled bet of {:.2} to player {}",
+                        refund_amount,
+                        player_to_refund.player
+                    );
                     player_to_refund.stake += refund_amount;
                     player_to_refund.bet_chips -= refund_amount; // Adjust their bet down to the called amount
                 }
@@ -820,7 +887,10 @@ impl State {
         let active_players: Vec<&PlayerState> =
             self.players_state.iter().filter(|ps| ps.active).collect();
 
-        let players_with_chips = active_players.iter().filter(|ps| ps.stake > 0.0).count();
+        let players_with_chips = active_players
+            .iter()
+            .filter(|ps| ps.stake >= MIN_STAKE_THRESHOLD)
+            .count();
 
         if active_players.len() <= 1 || players_with_chips <= 1 {
             verbose_println!(
@@ -839,7 +909,7 @@ impl State {
 
         while attempts < max_attempts {
             let player_state = &self.players_state[self.current_player as usize];
-            if player_state.active && player_state.stake > 0.0 {
+            if player_state.active && player_state.stake >= MIN_STAKE_THRESHOLD {
                 break;
             }
 
@@ -950,8 +1020,10 @@ impl State {
             self.set_winners(winners);
         }
 
-        // Ensure the game is marked as final after showdown
+        // Ensure the game is marked as final after showdown and update FSM
         self.final_state = true;
+        self.fsm = StateMachine::new(Box::new(GameOver));
+        self.legal_actions = vec![];
     }
 
     /// Set winners and calculate rewards
