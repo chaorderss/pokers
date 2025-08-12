@@ -6,17 +6,15 @@ pub mod action;
 pub mod card;
 pub mod stage;
 use action::{ActionEnum, ActionRecord};
-#[cfg(test)]
-use proptest_derive::Arbitrary;
 use card::Card;
 use stage::Stage;
 use std::collections::HashSet;
 use crate::game_logic::StateMachine;
+use std::collections::HashMap;
 
 /// Context for a single betting round
 #[pyclass]
 #[derive(Debug, Clone)]
-#[cfg_attr(test, derive(Arbitrary))]
 pub struct BettingRoundContext {
     #[pyo3(get, set)]
     pub amount_to_call: f64,
@@ -32,6 +30,8 @@ pub struct BettingRoundContext {
     pub starting_player: u64,
     #[pyo3(get, set)]
     pub player_acted: HashSet<u64>, // Track players who have acted
+    #[pyo3(get, set)]
+    pub player_action_counts: HashMap<u64, usize>, // Per-player action count for the current street
 }
 
 #[pymethods]
@@ -44,7 +44,6 @@ impl BettingRoundContext {
 
 #[pyclass]
 #[derive(Debug)]
-#[cfg_attr(test, derive(Arbitrary))]
 pub struct State {
     #[pyo3(get, set)]
     pub current_player: u64,
@@ -140,13 +139,13 @@ impl Default for BettingRoundContext {
             players_in_round: 0,
             starting_player: 0,
             player_acted: HashSet::new(),
+            player_action_counts: HashMap::new(),
         }
     }
 }
 
 #[pyclass]
 #[derive(Debug, Clone, Copy)]
-#[cfg_attr(test, derive(Arbitrary))]
 pub struct PlayerState {
     #[pyo3(get, set)]
     pub player: u64,
@@ -185,7 +184,6 @@ impl PlayerState {
 
 #[pyclass]
 #[derive(Debug, Clone, Copy)]
-#[cfg_attr(test, derive(Arbitrary))]
 pub enum StateStatus {
     Ok,
     IllegalAction,

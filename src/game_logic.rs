@@ -202,6 +202,23 @@ impl GameStateInterface for AwaitingAction {
         state: &mut State,
         action: Action,
     ) -> Result<Box<dyn GameStateInterface>, StateStatus> {
+        // Enforce per-player max 6 actions per street by downgrading actions
+        const MAX_ACTIONS_PER_STREET: usize = 6;
+        let player_id = self.player_to_act_idx;
+        let count_entry = state.context.player_action_counts.entry(player_id).or_insert(0);
+        let mut incoming_action = action;
+        if *count_entry >= MAX_ACTIONS_PER_STREET {
+            // If attempted BetRaise beyond limit -> downgrade to CheckCall else Fold
+            if incoming_action.action == ActionEnum::BetRaise {
+                // Prefer CheckCall if legal, else Fold
+                let legal = self.get_legal_actions(state);
+                if legal.contains(&ActionEnum::CheckCall) {
+                    incoming_action = Action::new(ActionEnum::CheckCall, 0.0);
+                } else if legal.contains(&ActionEnum::Fold) {
+                    incoming_action = Action::new(ActionEnum::Fold, 0.0);
+                }
+            }
+        }
         // Validate the action comes from the correct player
         // Safety check: ensure the current player can actually act
         let current_player_state = &state.players_state[self.player_to_act_idx as usize];
@@ -217,7 +234,7 @@ impl GameStateInterface for AwaitingAction {
         }
 
         // Make sure action is legal
-        let actual_action = self.make_action_legal(state, action);
+        let actual_action = self.make_action_legal(state, incoming_action);
         let player_idx = self.player_to_act_idx as usize;
         let mut final_action_for_record = actual_action;
 
@@ -345,6 +362,8 @@ impl GameStateInterface for AwaitingAction {
         state.context.player_acted.insert(self.player_to_act_idx);
 
         state.context.actions_this_round += 1;
+        // Increment per-player action count
+        *state.context.player_action_counts.entry(player_id).or_insert(0) += 1;
 
         let action_record = ActionRecord {
             player: self.player_to_act_idx,
@@ -706,6 +725,7 @@ impl State {
             players_in_round: active_players,
             starting_player: first_player,
             player_acted: HashSet::new(),
+            player_action_counts: std::collections::HashMap::new(),
         };
 
         let fsm = StateMachine::new(Box::new(AwaitingAction::new(first_player, context.clone())));
@@ -933,6 +953,7 @@ impl State {
             players_in_round: active_players,
             starting_player: self.current_player,
             player_acted: HashSet::new(),
+            player_action_counts: std::collections::HashMap::new(),
         };
 
         self.fsm = StateMachine::new(Box::new(AwaitingAction::new(
