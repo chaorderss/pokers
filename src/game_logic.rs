@@ -290,7 +290,9 @@ impl GameStateInterface for AwaitingAction {
             }
 
             ActionEnum::BetRaise => {
-                let desired_total_bet = actual_action.amount;
+                // actual_action.amount is now a multiplier of the pot size
+                let pot_multiplier = actual_action.amount;
+                let desired_total_bet = state.pot * pot_multiplier;
                 let current_player_bet = state.players_state[player_idx].bet_chips;
                 let player_stake = state.players_state[player_idx].stake;
 
