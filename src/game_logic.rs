@@ -813,6 +813,31 @@ impl State {
     pub fn __str__(&self) -> PyResult<String> {
         Ok(format!("{:#?}", self))
     }
+
+    pub fn reset_in_place(&mut self, initial_stack: Option<f64>, seed: Option<u64>, verbose: Option<bool>) -> PyResult<()> {
+        // Reinitialize current State in-place without allocating a brand new Python object.
+        // This will: draw a fresh deck, reshuffle, recreate players with equal stacks, reset context & FSM.
+        let n_players = self.players_state.len() as u64;
+        if n_players == 0 { return Ok(()); }
+        let total_chips: f64 = self.players_state.iter().map(|p| p.stake + p.bet_chips + p.pot_chips).sum();
+        let init_stack = initial_stack.unwrap_or_else(|| if total_chips > 0.0 { total_chips / n_players as f64 } else { self.bb * 100.0 });
+        let new_seed = seed.unwrap_or(self.seed.wrapping_add(1));
+        // Randomize button again
+        use rand::{SeedableRng, Rng};
+        let mut rng = rand::rngs::StdRng::seed_from_u64(new_seed ^ 0x9e3779b97f4a7c15);
+        let button = rng.gen_range(0..n_players);
+        let new_state = State::from_seed(
+            n_players,
+            button,
+            self.sb,
+            self.bb,
+            init_stack,
+            new_seed,
+            verbose.unwrap_or(self.verbose)
+        )?;
+        *self = new_state;
+        Ok(())
+    }
 }
 
 impl State {
