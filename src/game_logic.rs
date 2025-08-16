@@ -175,16 +175,29 @@ impl AwaitingAction {
         let legal_actions = self.get_legal_actions(state);
 
         match action.action {
-            ActionEnum::CheckCall => {
-                if legal_actions.contains(&ActionEnum::Fold) {
-                    Action::new(ActionEnum::Fold, 0.0)
+            ActionEnum::Check => {
+                if legal_actions.contains(&ActionEnum::Check) {
+                    action
+                } else if legal_actions.contains(&ActionEnum::Call) {
+                    Action::new(ActionEnum::Call, 0.0)
                 } else {
-                    action // Keep as is if fold is not legal either
+                    Action::new(ActionEnum::Fold, 0.0)
+                }
+            }
+            ActionEnum::Call => {
+                if legal_actions.contains(&ActionEnum::Call) {
+                    action
+                } else if legal_actions.contains(&ActionEnum::Check) {
+                    Action::new(ActionEnum::Check, 0.0)
+                } else {
+                    Action::new(ActionEnum::Fold, 0.0)
                 }
             }
             ActionEnum::BetRaise => {
-                if legal_actions.contains(&ActionEnum::CheckCall) {
-                    Action::new(ActionEnum::CheckCall, 0.0)
+                if legal_actions.contains(&ActionEnum::Check) {
+                    Action::new(ActionEnum::Check, 0.0)
+                } else if legal_actions.contains(&ActionEnum::Call) {
+                    Action::new(ActionEnum::Call, 0.0)
                 } else if legal_actions.contains(&ActionEnum::Fold) {
                     Action::new(ActionEnum::Fold, 0.0)
                 } else {
@@ -208,12 +221,13 @@ impl GameStateInterface for AwaitingAction {
         let count_entry = state.context.player_action_counts.entry(player_id).or_insert(0);
         let mut incoming_action = action;
         if *count_entry >= MAX_ACTIONS_PER_STREET {
-            // If attempted BetRaise beyond limit -> downgrade to CheckCall else Fold
+            // If attempted BetRaise beyond limit -> downgrade to Check/Call else Fold
             if incoming_action.action == ActionEnum::BetRaise {
-                // Prefer CheckCall if legal, else Fold
                 let legal = self.get_legal_actions(state);
-                if legal.contains(&ActionEnum::CheckCall) {
-                    incoming_action = Action::new(ActionEnum::CheckCall, 0.0);
+                if legal.contains(&ActionEnum::Check) {
+                    incoming_action = Action::new(ActionEnum::Check, 0.0);
+                } else if legal.contains(&ActionEnum::Call) {
+                    incoming_action = Action::new(ActionEnum::Call, 0.0);
                 } else if legal.contains(&ActionEnum::Fold) {
                     incoming_action = Action::new(ActionEnum::Fold, 0.0);
                 }
@@ -256,8 +270,11 @@ impl GameStateInterface for AwaitingAction {
                 state.players_state[player_idx].reward =
                     -(state.players_state[player_idx].pot_chips);
             }
-
-            ActionEnum::CheckCall => {
+            ActionEnum::Check => {
+                // No chips move on check; legality ensured in make_action_legal/get_legal_actions
+                final_action_for_record = Action::new(ActionEnum::Check, 0.0);
+            }
+            ActionEnum::Call => {
                 let max_bet = state
                     .players_state
                     .iter()
@@ -266,27 +283,22 @@ impl GameStateInterface for AwaitingAction {
                     .fold(0.0f64, f64::max);
 
                 let current_player_bet = state.players_state[player_idx].bet_chips;
-                let is_check = current_player_bet >= max_bet;
+                let required_chips = (max_bet - current_player_bet).max(0.0);
+                let player_stake = state.players_state[player_idx].stake;
 
-                if !is_check {
-                    // Call - match the maximum bet
-                    let required_chips = max_bet - current_player_bet;
-                    let player_stake = state.players_state[player_idx].stake;
+                let actual_chips = if required_chips >= player_stake {
+                    // Go all-in if can't fully match. Use >= to handle exact amount.
+                    state.players_state[player_idx].stake = 0.0;
+                    player_stake
+                } else {
+                    state.players_state[player_idx].stake -= required_chips;
+                    required_chips
+                };
 
-                    let actual_chips = if required_chips >= player_stake {
-                        // Go all-in if can't match. Use >= to handle exact amount.
-                        state.players_state[player_idx].stake = 0.0;
-                        player_stake
-                    } else {
-                        state.players_state[player_idx].stake -= required_chips;
-                        required_chips
-                    };
+                state.players_state[player_idx].bet_chips += actual_chips;
+                state.pot += actual_chips;
 
-                    state.players_state[player_idx].bet_chips += actual_chips;
-                    state.pot += actual_chips;
-
-                    final_action_for_record = Action::new(ActionEnum::CheckCall, actual_chips);
-                }
+                final_action_for_record = Action::new(ActionEnum::Call, actual_chips);
             }
 
             ActionEnum::BetRaise => {
@@ -484,8 +496,18 @@ impl GameStateInterface for AwaitingAction {
 
         let mut legal_actions = vec![ActionEnum::Fold];
 
-        // Always allow CheckCall
-        legal_actions.push(ActionEnum::CheckCall);
+        // Allow Check if no bet to call; otherwise allow Call
+        let max_bet = state
+            .players_state
+            .iter()
+            .filter(|ps| ps.active)
+            .map(|ps| ps.bet_chips)
+            .fold(0.0f64, f64::max);
+        if (player_state.bet_chips + 1e-9) >= max_bet {
+            legal_actions.push(ActionEnum::Check);
+        } else {
+            legal_actions.push(ActionEnum::Call);
+        }
 
         // Allow BetRaise if player has chips to bet
         if player_state.stake >= MIN_STAKE_THRESHOLD {
@@ -1306,8 +1328,17 @@ pub fn legal_actions(state: &State) -> Vec<ActionEnum> {
 
     let mut legal_actions = vec![ActionEnum::Fold];
 
-    // Always allow CheckCall
-    legal_actions.push(ActionEnum::CheckCall);
+    // Allow Check if no bet to call; otherwise allow Call
+    let max_bet = state
+        .players_state
+        .iter()
+        .map(|ps| ps.bet_chips)
+        .fold(0.0f64, f64::max);
+    if (current_player_state.bet_chips + 1e-9) >= max_bet {
+        legal_actions.push(ActionEnum::Check);
+    } else {
+        legal_actions.push(ActionEnum::Call);
+    }
 
     // Allow BetRaise if player has chips to bet
     if current_player_state.stake > 0.0 {

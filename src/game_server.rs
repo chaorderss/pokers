@@ -215,8 +215,8 @@ impl GameServer {
             // Convert PlayerAction to game logic Action
             let game_action = match action {
                 PlayerAction::Fold => Action::new(ActionEnum::Fold, 0.0),
-                PlayerAction::Check => Action::new(ActionEnum::CheckCall, 0.0),
-                PlayerAction::Call => Action::new(ActionEnum::CheckCall, 0.0),
+                PlayerAction::Check => Action::new(ActionEnum::Check, 0.0),
+                PlayerAction::Call => Action::new(ActionEnum::Call, 0.0),
                 PlayerAction::Raise(amount) => Action::new(ActionEnum::BetRaise, amount),
                 PlayerAction::Bet(amount) => Action::new(ActionEnum::BetRaise, amount),
             };

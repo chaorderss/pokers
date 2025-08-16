@@ -34,7 +34,8 @@ impl Action {
 #[cfg_attr(test, derive(Arbitrary))]
 pub enum ActionEnum {
     Fold,
-    CheckCall,
+    Check,
+    Call,
     BetRaise,
 }
 
