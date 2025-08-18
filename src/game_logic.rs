@@ -247,7 +247,12 @@ impl GameStateInterface for AwaitingAction {
             return Ok(Box::new(RoundOver::new()));
         }
 
-        // Make sure action is legal
+    // Capture pre-action context BEFORE applying any state changes (for logging/records)
+    let legal_actions_before = state.get_legal_action_ints_internal();
+    let pre_action_player = self.player_to_act_idx;
+    let pre_action_stage = state.stage;
+
+    // Make sure action is legal
         let actual_action = self.make_action_legal(state, incoming_action);
         let player_idx = self.player_to_act_idx as usize;
         let mut final_action_for_record = actual_action;
@@ -304,7 +309,7 @@ impl GameStateInterface for AwaitingAction {
             ActionEnum::BetRaise => {
                 // actual_action.amount is now a multiplier of the pot size
                 let pot_multiplier = actual_action.amount;
-                let desired_total_bet = state.pot * pot_multiplier;
+                let desired_total_bet = state.effective_pot() * pot_multiplier;
                 let current_player_bet = state.players_state[player_idx].bet_chips;
                 let player_stake = state.players_state[player_idx].stake;
 
@@ -380,10 +385,11 @@ impl GameStateInterface for AwaitingAction {
         *state.context.player_action_counts.entry(player_id).or_insert(0) += 1;
 
         let action_record = ActionRecord {
-            player: self.player_to_act_idx,
+            player: pre_action_player,
             action: final_action_for_record,
-            stage: state.stage,
-            legal_actions: self.get_legal_actions(state),
+            stage: pre_action_stage,
+            // Use the pre-action legal actions snapshot
+            legal_actions: legal_actions_before,
         };
         state.from_action = Some(action_record.clone());
         state.action_list.push(action_record);
@@ -509,9 +515,17 @@ impl GameStateInterface for AwaitingAction {
             legal_actions.push(ActionEnum::Call);
         }
 
-        // Allow BetRaise if player has chips to bet
+        // Allow BetRaise only if a valid raise (at least min raise) is possible
+        // Mirror C++: need to be able to reach at least (max_bet + min_raise_amount)
         if player_state.stake >= MIN_STAKE_THRESHOLD {
-            legal_actions.push(ActionEnum::BetRaise);
+            let current_player_bet = player_state.bet_chips;
+            // Determine minimum raise amount: if already beyond BB, use last raise size; else at least BB
+            let min_raise_amount = if max_bet > state.bb { state.context.last_raise_amount } else { state.bb };
+            let min_valid_bet = max_bet + min_raise_amount;
+            // If player's total possible bet (current bet + stake) can reach the minimum valid raise, enable BetRaise
+            if current_player_bet + player_state.stake + 1e-9 >= min_valid_bet {
+                legal_actions.push(ActionEnum::BetRaise);
+            }
         }
 
         legal_actions
@@ -638,7 +652,7 @@ impl StateMachine {
 #[pymethods]
 impl State {
     #[staticmethod]
-    #[pyo3(signature = (n_players, button, sb, bb, stake, seed, verbose=false))]
+    #[pyo3(signature = (n_players, button, sb, bb, stake, seed, verbose=false, betraise_multipliers=None))]
     pub fn from_seed(
         n_players: u64,
         button: u64,
@@ -647,16 +661,17 @@ impl State {
         stake: f64,
         seed: u64,
         verbose: bool,
+        betraise_multipliers: Option<Vec<f64>>,
     ) -> Result<State, InitStateError> {
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
         let mut deck: Vec<Card> = Card::collect();
         deck.shuffle(&mut rng);
 
-        State::from_deck(n_players, button, sb, bb, stake, deck, verbose, seed)
+        State::from_deck(n_players, button, sb, bb, stake, deck, verbose, seed, betraise_multipliers)
     }
 
     #[staticmethod]
-    #[pyo3(signature = (n_players, button, sb, bb, stake, deck, verbose=false, seed=0))]
+    #[pyo3(signature = (n_players, button, sb, bb, stake, deck, verbose=false, seed=0, betraise_multipliers=None))]
     pub fn from_deck(
         n_players: u64,
         button: u64,
@@ -666,6 +681,7 @@ impl State {
         mut deck: Vec<Card>,
         verbose: bool,
         seed: u64,
+        betraise_multipliers: Option<Vec<f64>>,
     ) -> Result<State, InitStateError> {
         // Validation
         if n_players < 2 {
@@ -763,12 +779,14 @@ impl State {
             from_action: None,
             action_list: Vec::new(),
             legal_actions: Vec::new(),
+            legal_actions_detailed: Vec::new(),
             deck: deck,
             final_state: false,
             pot: sb + bb,
             min_bet: bb,
             sb: sb,
             bb: bb,
+            betraise_multipliers: betraise_multipliers.unwrap_or_else(|| vec![1.0, 2.0, 3.0]),
             status: StateStatus::Ok,
             verbose: verbose,
             seed: seed,
@@ -779,10 +797,37 @@ impl State {
         // Update range indices for all players
         state.update_range_indices();
 
-        // Set legal actions from FSM
-        state.legal_actions = state.fsm.get_legal_actions(&state);
+    // Set legal actions from FSM and build detailed variants using configured bet/raise sizes
+    state.legal_actions = state.fsm.get_legal_actions(&state);
+    state.legal_actions_detailed = state.compute_legal_actions_detailed();
 
         Ok(state)
+    }
+
+    /// Return a freshly computed list of detailed legal actions as Action objects
+    pub fn legal_actions_detailed_now(&self) -> Vec<Action> {
+        self.compute_legal_actions_detailed()
+    }
+
+    /// Convenience: return detailed legal actions as (name, amount) tuples
+    pub fn legal_actions_detailed_tuples(&self) -> Vec<(String, f64)> {
+        self.compute_legal_actions_detailed()
+            .into_iter()
+            .map(|a| {
+                let name = match a.action {
+                    ActionEnum::Fold => "Fold".to_string(),
+                    ActionEnum::Check => "Check".to_string(),
+                    ActionEnum::Call => "Call".to_string(),
+                    ActionEnum::BetRaise => "BetRaise".to_string(),
+                };
+                (name, a.amount)
+            })
+            .collect()
+    }
+
+    /// Return the current count of detailed legal actions
+    pub fn legal_actions_detailed_len(&self) -> usize {
+        self.compute_legal_actions_detailed().len()
     }
 
     pub fn apply_action(&mut self, action: Action) -> PyResult<()> {
@@ -791,6 +836,7 @@ impl State {
             if !self.final_state {
                 self.handle_showdown();
             }
+            self.legal_actions_detailed = vec![];
             return Ok(());
         }
 
@@ -809,9 +855,11 @@ impl State {
                     // and put the updated FSM back into the state.
                     if !self.final_state {
                         self.legal_actions = fsm.get_legal_actions(self);
+                        self.legal_actions_detailed = self.compute_legal_actions_detailed();
                     } else {
                         // Game is final, no legal actions
                         self.legal_actions = vec![];
+                        self.legal_actions_detailed = vec![];
                     }
                     self.fsm = fsm;
                 }
@@ -825,6 +873,25 @@ impl State {
         }
 
         Ok(())
+    }
+
+    /// Overload: apply_action using index into current detailed legal action list.
+    /// This allows callers to pass an integer corresponding to one of the legal actions in order.
+    pub fn apply_action_int(&mut self, action_int: usize) -> PyResult<()> {
+        if self.final_state || self.stage == Stage::Showdown {
+            // Look like existing behavior: finish showdown if needed
+            if !self.final_state {
+                self.handle_showdown();
+            }
+            return Ok(());
+        }
+        if action_int >= self.legal_actions_detailed.len() {
+            // Out of range -> mark illegal
+            self.status = StateStatus::IllegalAction;
+            return Ok(());
+        }
+        let action = self.legal_actions_detailed[action_int];
+        self.apply_action(action)
     }
 
     #[pyo3(name = "clone")]
@@ -855,10 +922,22 @@ impl State {
             self.bb,
             init_stack,
             new_seed,
-            verbose.unwrap_or(self.verbose)
+            verbose.unwrap_or(self.verbose),
+            Some(self.betraise_multipliers.clone()),
         )?;
         *self = new_state;
         Ok(())
+    }
+
+    /// Return the current discrete legal action indices for the acting player.
+    pub fn get_legal_action_ints(&self) -> Vec<i64> {
+        self.get_legal_action_ints_internal()
+    }
+
+    /// Python-exposed helper to get the effective pot (committed + current bets)
+    #[pyo3(name = "effective_pot")]
+    pub fn py_effective_pot(&self) -> f64 {
+        State::effective_pot(self)
     }
 }
 
@@ -1005,11 +1084,13 @@ impl State {
             player_action_counts: std::collections::HashMap::new(),
         };
 
-        self.fsm = StateMachine::new(Box::new(AwaitingAction::new(
+    self.fsm = StateMachine::new(Box::new(AwaitingAction::new(
             self.current_player,
             self.context.clone(),
         )));
-        self.legal_actions = self.fsm.get_legal_actions(self);
+    self.legal_actions = self.fsm.get_legal_actions(self);
+    self.legal_actions_detailed = self.compute_legal_actions_detailed();
+
     }
 
     /// Complete to showdown and handle final outcome
@@ -1093,7 +1174,8 @@ impl State {
         // Ensure the game is marked as final after showdown and update FSM
         self.final_state = true;
         self.fsm = StateMachine::new(Box::new(GameOver));
-        self.legal_actions = vec![];
+    self.legal_actions = vec![];
+    self.legal_actions_detailed = vec![];
     }
 
     /// Set winners and calculate rewards
@@ -1446,7 +1528,7 @@ mod tests {
     proptest! {
         #[test]
         fn from_deck_doesnt_crash(n_players in 0..10000, deck: Vec<Card>, sb in 0.5_f64..100.0_f64, bb_mult in 2..5, stake_mult in 100..1000, actions: Vec<Action>) {
-            let initial_state = State::from_deck(n_players as u64, 0, sb, sb * bb_mult as f64, sb * stake_mult as f64, deck, false, 12345);
+            let initial_state = State::from_deck(n_players as u64, 0, sb, sb * bb_mult as f64, sb * stake_mult as f64, deck, false, 12345, None);
             match initial_state {
                 Ok(mut state) => {
                     for action in actions.iter().take(100) {
@@ -1463,7 +1545,7 @@ mod tests {
         #[test]
         fn zero_sum_game(n_players in 2..26, seed: u64, sb in 0.5_f64..100.0_f64, bb_mult in 2..5, stake_mult in 100..1000, actions in prop::collection::vec(Action::arbitrary_with(((), ())).prop_filter("Raise abs amount bellow 1e12",
         |a| a.amount.abs() < 1e12), 1..100)) {
-            let initial_state = State::from_seed(n_players as u64, 0, sb, sb * bb_mult as f64, sb * stake_mult as f64, seed, false);
+            let initial_state = State::from_seed(n_players as u64, 0, sb, sb * bb_mult as f64, sb * stake_mult as f64, seed, false, None);
             match initial_state {
                 Ok(mut state) => {
                     for action in actions {

@@ -42,6 +42,7 @@ class State:
         verbose: bool = False,
     ) -> State: ...
     def apply_action(self, action: Action) -> State: ...
+    def get_legal_action_ints(self) -> list[int]: ...
     def __str__(self) -> str: ...
 
 class PlayerState:
@@ -68,7 +69,7 @@ class ActionRecord:
     player: int
     stage: Stage
     action: Action
-    legal_actions: list[ActionEnum]
+    legal_actions: list[int]
 
 class ActionEnum(Enum):
     Fold = 0

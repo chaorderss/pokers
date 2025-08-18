@@ -53,5 +53,5 @@ pub struct ActionRecord {
     pub action: Action,
 
     #[pyo3(get, set)]
-    pub legal_actions: Vec<ActionEnum>,
+    pub legal_actions: Vec<i64>,
 }

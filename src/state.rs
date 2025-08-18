@@ -69,6 +69,10 @@ pub struct State {
     #[pyo3(get, set)]
     pub legal_actions: Vec<ActionEnum>,
 
+    // Detailed legal actions for the current player, including BetRaise with concrete sizing
+    #[pyo3(get, set)]
+    pub legal_actions_detailed: Vec<action::Action>,
+
     #[pyo3(get, set)]
     pub deck: Vec<Card>,
 
@@ -83,6 +87,10 @@ pub struct State {
 
     #[pyo3(get, set)]
     pub bb: f64,
+
+    // Allowed bet/raise sizings expressed as pot multipliers (e.g., 1.0, 2.0, 3.0)
+    #[pyo3(get, set)]
+    pub betraise_multipliers: Vec<f64>,
 
     #[pyo3(get, set)]
     pub final_state: bool,
@@ -114,11 +122,13 @@ impl Clone for State {
             from_action: self.from_action.clone(),
             action_list: self.action_list.clone(),
             legal_actions: self.legal_actions.clone(),
+            legal_actions_detailed: self.legal_actions_detailed.clone(),
             deck: self.deck.clone(),
             pot: self.pot,
             min_bet: self.min_bet,
             sb: self.sb,
             bb: self.bb,
+            betraise_multipliers: self.betraise_multipliers.clone(),
             final_state: self.final_state,
             status: self.status,
             verbose: self.verbose,
@@ -487,4 +497,117 @@ impl State {
             self.players_state[i].range_idx = range_idx;
         }
     }
+
+    /// Construct detailed legal actions for the current player using configured bet/raise sizes.
+    /// Returns a vector of Action where BetRaise actions carry concrete target total bet as amount (pot multiplier).
+    pub fn compute_legal_actions_detailed(&self) -> Vec<action::Action> {
+        use action::{Action, ActionEnum};
+        if self.final_state || self.stage == Stage::Showdown {
+            return vec![];
+        }
+        let mut out: Vec<Action> = Vec::new();
+        let player_state = &self.players_state[self.current_player as usize];
+        if player_state.stake == 0.0 {
+            return out;
+        }
+        // Always allow Fold
+        out.push(Action::new(ActionEnum::Fold, 0.0));
+        // Check/Call
+        let max_bet = self
+            .players_state
+            .iter()
+            .filter(|ps| ps.active)
+            .map(|ps| ps.bet_chips)
+            .fold(0.0f64, f64::max);
+        if (player_state.bet_chips + 1e-9) >= max_bet {
+            out.push(Action::new(ActionEnum::Check, 0.0));
+        } else {
+            out.push(Action::new(ActionEnum::Call, 0.0));
+        }
+        // Bet/Raise sizes from configured multipliers, only if a valid raise is reachable
+        // Mirror C++ gating: player must be able to reach at least (max_bet + min_raise_amount)
+        if player_state.stake > 0.0 {
+            // Determine minimum raise amount: if already beyond BB, use last raise size; else at least BB
+            let min_raise_amount = if max_bet > self.bb {
+                self.context.last_raise_amount
+            } else {
+                self.bb
+            };
+            let min_valid_bet = max_bet + min_raise_amount;
+            let current_player_bet = player_state.bet_chips;
+            let can_reach_min_raise = current_player_bet + player_state.stake + 1e-9 >= min_valid_bet;
+            if can_reach_min_raise {
+                // Only include BetRaise sizes the player can afford (desired_total_bet <= current_bet + stake)
+                let max_affordable_total_bet = current_player_bet + player_state.stake;
+                for &m in &self.betraise_multipliers {
+                    // Use effective pot (committed + current bets) to scale sizing
+                    let desired_total_bet = self.effective_pot() * m;
+                    if desired_total_bet <= max_affordable_total_bet + 1e-9 {
+                        // Store the multiplier in amount; game_logic interprets it as pot multiplier
+                        out.push(Action::new(ActionEnum::BetRaise, m));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Internal helper: compute discrete legal action indices following the convention
+    /// 0=Fold, 1=Check (if available), 2=Call (if available),
+    /// and 3.. = BetRaise options aligned with betraise_multipliers order.
+    pub fn get_legal_action_ints_internal(&self) -> Vec<i64> {
+        // Base on detailed actions to preserve gating and ordering
+        let detailed = self.compute_legal_actions_detailed();
+        let mut out: Vec<i64> = Vec::new();
+
+        // The mapping policy:
+        // - Always include 0 for Fold (detailed[0])
+        // - If detailed contains Check, map it to 1.
+        // - If detailed contains Call as well as Check, map Call to 2.
+        //   If only Call exists (no Check), map Call to 1.
+        // - For BetRaise entries, map sequentially starting at 3, in the same order as betraise_multipliers
+        //   Note: Only added when detailed has BetRaise entries, which it already gates correctly.
+
+        let mut has_check = false;
+        let mut has_call = false;
+        for a in &detailed {
+            match a.action {
+                ActionEnum::Fold => {}
+                ActionEnum::Check => has_check = true,
+                ActionEnum::Call => has_call = true,
+                ActionEnum::BetRaise => {}
+            }
+        }
+
+        // Always push Fold (0)
+        out.push(0);
+
+    // Handle Check/Call slots strictly by convention indices
+    if has_check { out.push(1); }
+    if has_call { out.push(2); }
+
+        // BetRaise slots start at 3
+        let mut next_idx = 3i64;
+        for a in &detailed {
+            if matches!(a.action, ActionEnum::BetRaise) {
+                out.push(next_idx);
+                next_idx += 1;
+            }
+        }
+        out
+    }
+
+    /// Effective pot helper for sizing decisions.
+    /// Returns the sum of chips already committed to the pot (pot_chips)
+    /// plus chips currently bet on the table this street (bet_chips) across all players.
+    /// This avoids relying on `self.pot` accounting details and reflects real-time pot size.
+    pub fn effective_pot(&self) -> f64 {
+        self.players_state
+            .iter()
+            .map(|ps| ps.pot_chips + ps.bet_chips)
+            .sum()
+    }
 }
+
+
+
