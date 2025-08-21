@@ -12,7 +12,7 @@ pub fn parallel_apply_action(mut states: Vec<State>, actions: Vec<Action>) -> Ve
         .for_each(|(s, a)| {
             // apply_action now returns PyResult<()> and modifies in place.
             // We can ignore the result here as errors are stored in state.status.
-            let _ = s.apply_action(a);
+            s.apply_action_rs(a);
         });
     states
 }

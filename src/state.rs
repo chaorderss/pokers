@@ -519,10 +519,17 @@ impl State {
             .filter(|ps| ps.active)
             .map(|ps| ps.bet_chips)
             .fold(0.0f64, f64::max);
-        if (player_state.bet_chips + 1e-9) >= max_bet {
+        if self.betraise_multipliers.is_empty() {
+            // When no preset sizings are configured, expose both Check and Call for API completeness.
+            // Legality will be enforced by the state machine when applying actions.
             out.push(Action::new(ActionEnum::Check, 0.0));
-        } else {
             out.push(Action::new(ActionEnum::Call, 0.0));
+        } else {
+            if (player_state.bet_chips + 1e-9) >= max_bet {
+                out.push(Action::new(ActionEnum::Check, 0.0));
+            } else {
+                out.push(Action::new(ActionEnum::Call, 0.0));
+            }
         }
         // Bet/Raise sizes from configured multipliers, only if a valid raise is reachable
         // Mirror C++ gating: player must be able to reach at least (max_bet + min_raise_amount)
@@ -537,14 +544,20 @@ impl State {
             let current_player_bet = player_state.bet_chips;
             let can_reach_min_raise = current_player_bet + player_state.stake + 1e-9 >= min_valid_bet;
             if can_reach_min_raise {
-                // Only include BetRaise sizes the player can afford (desired_total_bet <= current_bet + stake)
-                let max_affordable_total_bet = current_player_bet + player_state.stake;
-                for &m in &self.betraise_multipliers {
-                    // Use effective pot (committed + current bets) to scale sizing
-                    let desired_total_bet = self.effective_pot() * m;
-                    if desired_total_bet <= max_affordable_total_bet + 1e-9 {
-                        // Store the multiplier in amount; game_logic interprets it as pot multiplier
-                        out.push(Action::new(ActionEnum::BetRaise, m));
+                if self.betraise_multipliers.is_empty() {
+                    // No preset sizings configured: expose a single generic BetRaise option.
+                    // Use 1.0 as a sensible default multiplier; engine will clamp to min-raise/all-in if needed.
+                    out.push(Action::new(ActionEnum::BetRaise, 1.0));
+                } else {
+                    // Only include BetRaise sizes the player can afford (desired_total_bet <= current_bet + stake)
+                    let max_affordable_total_bet = current_player_bet + player_state.stake;
+                    for &m in &self.betraise_multipliers {
+                        // Use effective pot (committed + current bets) to scale sizing
+                        let desired_total_bet = self.effective_pot() * m;
+                        if desired_total_bet <= max_affordable_total_bet + 1e-9 {
+                            // Store the multiplier in amount; game_logic interprets it as pot multiplier
+                            out.push(Action::new(ActionEnum::BetRaise, m));
+                        }
                     }
                 }
             }
@@ -556,28 +569,22 @@ impl State {
     /// 0=Fold, 1=Check (if available), 2=Call (if available),
     /// and 3.. = BetRaise options aligned with betraise_multipliers order.
     pub fn get_legal_action_ints_internal(&self) -> Vec<i64> {
-        // Base on detailed actions to preserve gating and ordering
-        let detailed = self.compute_legal_actions_detailed();
+    // Base BetRaise slots on detailed actions for sizing, but derive Check/Call legality from FSM
+    let detailed = self.compute_legal_actions_detailed();
         let mut out: Vec<i64> = Vec::new();
 
         // The mapping policy:
         // - Always include 0 for Fold (detailed[0])
-        // - If detailed contains Check, map it to 1.
-        // - If detailed contains Call as well as Check, map Call to 2.
-        //   If only Call exists (no Check), map Call to 1.
+    // - If Check is legal, map it to 1.
+    // - If Call is legal as well as Check, map Call to 2.
+    //   If only Call is legal (no Check), map Call to 1.
         // - For BetRaise entries, map sequentially starting at 3, in the same order as betraise_multipliers
         //   Note: Only added when detailed has BetRaise entries, which it already gates correctly.
 
-        let mut has_check = false;
-        let mut has_call = false;
-        for a in &detailed {
-            match a.action {
-                ActionEnum::Fold => {}
-                ActionEnum::Check => has_check = true,
-                ActionEnum::Call => has_call = true,
-                ActionEnum::BetRaise => {}
-            }
-        }
+    // Query FSM for true legality of Check/Call
+    let legal_enums = self.fsm.get_legal_actions(self);
+    let has_check = legal_enums.iter().any(|a| matches!(a, ActionEnum::Check));
+    let has_call = legal_enums.iter().any(|a| matches!(a, ActionEnum::Call));
 
         // Always push Fold (0)
         out.push(0);

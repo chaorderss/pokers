@@ -110,7 +110,7 @@ impl AwaitingAction {
             return true;
         }
 
-        // All players who are not all-in must have acted since the last raise.
+        // All players who are not all-in must have acted since the last raise (tracked by stable player id)
         let all_acted = active_players.iter().all(|p| {
             p.stake < MIN_STAKE_THRESHOLD || state.context.player_acted.contains(&p.player)
         });
@@ -126,7 +126,7 @@ impl AwaitingAction {
             .fold(0.0f64, f64::max);
         let all_bets_equal = active_players
             .iter()
-            .all(|p| p.stake < MIN_STAKE_THRESHOLD || p.bet_chips == max_bet);
+            .all(|p| p.stake < MIN_STAKE_THRESHOLD || (p.bet_chips - max_bet).abs() < 1e-9);
 
         all_bets_equal
     }
@@ -216,9 +216,10 @@ impl GameStateInterface for AwaitingAction {
         action: Action,
     ) -> Result<Box<dyn GameStateInterface>, StateStatus> {
         // Enforce per-player max 6 actions per street by downgrading actions
-        const MAX_ACTIONS_PER_STREET: usize = 6;
-        let player_id = self.player_to_act_idx;
-        let count_entry = state.context.player_action_counts.entry(player_id).or_insert(0);
+    const MAX_ACTIONS_PER_STREET: usize = 6;
+    // Use stable player id (State.players_state[i].player) instead of table index
+    let player_id = state.players_state[self.player_to_act_idx as usize].player;
+    let count_entry = state.context.player_action_counts.entry(player_id).or_insert(0);
         let mut incoming_action = action;
         if *count_entry >= MAX_ACTIONS_PER_STREET {
             // If attempted BetRaise beyond limit -> downgrade to Check/Call else Fold
@@ -365,7 +366,8 @@ impl GameStateInterface for AwaitingAction {
                     state.context.last_raise_amount = raise_increment;
                     state.context.last_raiser_idx = Some(self.player_to_act_idx);
                     state.context.player_acted.clear(); // Clear actors on raise
-                    state.context.player_acted.insert(self.player_to_act_idx); // Re-add raiser
+                    // Track by stable player id
+                    state.context.player_acted.insert(state.players_state[player_idx].player); // Re-add raiser
                     state.context.actions_this_round = 0; // Reset action count on raise
                 }
                 final_action_for_record = Action::new(
@@ -377,8 +379,8 @@ impl GameStateInterface for AwaitingAction {
 
         // Record the action
         state.players_state[player_idx].last_stage_action = Some(actual_action.action);
-        // Track that player has acted
-        state.context.player_acted.insert(self.player_to_act_idx);
+    // Track that player has acted (by stable player id)
+    state.context.player_acted.insert(state.players_state[player_idx].player);
 
         state.context.actions_this_round += 1;
         // Increment per-player action count
@@ -786,7 +788,8 @@ impl State {
             min_bet: bb,
             sb: sb,
             bb: bb,
-            betraise_multipliers: betraise_multipliers.unwrap_or_else(|| vec![1.0, 2.0, 3.0]),
+            // If not provided, leave empty to signal generic BetRaise (no preset sizings)
+            betraise_multipliers: betraise_multipliers.unwrap_or_else(|| vec![]),
             status: StateStatus::Ok,
             verbose: verbose,
             seed: seed,
@@ -830,58 +833,25 @@ impl State {
         self.compute_legal_actions_detailed().len()
     }
 
-    pub fn apply_action(&mut self, action: Action) -> PyResult<()> {
-        // If we're at showdown, no actions are allowed - handle showdown and finish
-        if self.stage == Stage::Showdown {
-            if !self.final_state {
-                self.handle_showdown();
-            }
-            self.legal_actions_detailed = vec![];
-            return Ok(());
-        }
-
-        // Temporarily take ownership of the FSM to avoid conflicting mutable borrows of `self`.
-        let mut fsm = std::mem::replace(&mut self.fsm, StateMachine::new(Box::new(GameOver)));
-
-        // Now `fsm` is a separate variable, and we can pass `&mut self` to its methods.
-        match fsm.apply_action(self, action) {
-            Ok(()) => {
-                if fsm.is_final() && !self.final_state {
-                    // The round has ended. Advance the game stage.
-                    // This function will set a new FSM for the new stage, so we don't put the old `fsm` back.
-                    self.advance_to_next_stage_or_showdown();
-                } else {
-                    // The round is not over. Update legal actions for the next player
-                    // and put the updated FSM back into the state.
-                    if !self.final_state {
-                        self.legal_actions = fsm.get_legal_actions(self);
-                        self.legal_actions_detailed = self.compute_legal_actions_detailed();
-                    } else {
-                        // Game is final, no legal actions
-                        self.legal_actions = vec![];
-                        self.legal_actions_detailed = vec![];
-                    }
-                    self.fsm = fsm;
-                }
-            }
-            Err(status) => {
-                self.status = status;
-                // On error, the FSM is now in a terminal state (GameOver).
-                // Put it back to prevent further actions.
-                self.fsm = fsm;
-            }
-        }
+    pub fn apply_action(&mut self, py: Python<'_>, action: Action) -> PyResult<()> {
+        // Release the Python GIL while performing heavy game-state transitions
+        py.allow_threads(|| {
+            self.apply_action_rs(action);
+        });
 
         Ok(())
     }
 
     /// Overload: apply_action using index into current detailed legal action list.
     /// This allows callers to pass an integer corresponding to one of the legal actions in order.
-    pub fn apply_action_int(&mut self, action_int: usize) -> PyResult<()> {
+    pub fn apply_action_int(&mut self, py: Python<'_>, action_int: usize) -> PyResult<()> {
         if self.final_state || self.stage == Stage::Showdown {
             // Look like existing behavior: finish showdown if needed
             if !self.final_state {
-                self.handle_showdown();
+                // Release GIL while handling showdown
+                py.allow_threads(|| {
+                    self.handle_showdown();
+                });
             }
             return Ok(());
         }
@@ -890,8 +860,10 @@ impl State {
             self.status = StateStatus::IllegalAction;
             return Ok(());
         }
-        let action = self.legal_actions_detailed[action_int];
-        self.apply_action(action)
+        py.allow_threads(|| {
+            self.apply_action_int_rs(action_int);
+        });
+        Ok(())
     }
 
     #[pyo3(name = "clone")]
@@ -903,29 +875,37 @@ impl State {
         Ok(format!("{:#?}", self))
     }
 
-    pub fn reset_in_place(&mut self, initial_stack: Option<f64>, seed: Option<u64>, verbose: Option<bool>) -> PyResult<()> {
+    pub fn reset_in_place(&mut self, py: Python<'_>, initial_stack: Option<f64>, seed: Option<u64>, verbose: Option<bool>) -> PyResult<()> {
         // Reinitialize current State in-place without allocating a brand new Python object.
         // This will: draw a fresh deck, reshuffle, recreate players with equal stacks, reset context & FSM.
-        let n_players = self.players_state.len() as u64;
-        if n_players == 0 { return Ok(()); }
-        let total_chips: f64 = self.players_state.iter().map(|p| p.stake + p.bet_chips + p.pot_chips).sum();
-        let init_stack = initial_stack.unwrap_or_else(|| if total_chips > 0.0 { total_chips / n_players as f64 } else { self.bb * 100.0 });
-        let new_seed = seed.unwrap_or(self.seed.wrapping_add(1));
-        // Randomize button again
-        use rand::{SeedableRng, Rng};
-        let mut rng = rand::rngs::StdRng::seed_from_u64(new_seed ^ 0x9e3779b97f4a7c15);
-        let button = rng.gen_range(0..n_players);
-        let new_state = State::from_seed(
-            n_players,
-            button,
-            self.sb,
-            self.bb,
-            init_stack,
-            new_seed,
-            verbose.unwrap_or(self.verbose),
-            Some(self.betraise_multipliers.clone()),
-        )?;
-        *self = new_state;
+        let mut result_state: Option<State> = None;
+        let mut result_err: Option<InitStateError> = None;
+        py.allow_threads(|| {
+            let n_players = self.players_state.len() as u64;
+            if n_players == 0 { return; }
+            let total_chips: f64 = self.players_state.iter().map(|p| p.stake + p.bet_chips + p.pot_chips).sum();
+            let init_stack = initial_stack.unwrap_or_else(|| if total_chips > 0.0 { total_chips / n_players as f64 } else { self.bb * 100.0 });
+            let new_seed = seed.unwrap_or(self.seed.wrapping_add(1));
+            // Randomize button again
+            use rand::{SeedableRng, Rng};
+            let mut rng = rand::rngs::StdRng::seed_from_u64(new_seed ^ 0x9e3779b97f4a7c15);
+            let button = rng.gen_range(0..n_players);
+            match State::from_seed(
+                n_players,
+                button,
+                self.sb,
+                self.bb,
+                init_stack,
+                new_seed,
+                verbose.unwrap_or(self.verbose),
+                Some(self.betraise_multipliers.clone()),
+            ) {
+                Ok(ns) => result_state = Some(ns),
+                Err(e) => result_err = Some(e),
+            }
+        });
+        if let Some(e) = result_err { return Err(PyErr::from(e)); }
+        if let Some(ns) = result_state { *self = ns; }
         Ok(())
     }
 
@@ -1202,6 +1182,67 @@ impl State {
         }
 
         self.final_state = true;
+    }
+
+    /// Internal heavy apply_action implementation that does not require Python GIL
+    pub fn apply_action_rs(&mut self, action: Action) {
+        // If we're at showdown, no actions are allowed - handle showdown and finish
+        if self.stage == Stage::Showdown {
+            if !self.final_state {
+                self.handle_showdown();
+            }
+            self.legal_actions_detailed = vec![];
+            return;
+        }
+
+        // Temporarily take ownership of the FSM to avoid conflicting mutable borrows of `self`.
+        let mut fsm = std::mem::replace(&mut self.fsm, StateMachine::new(Box::new(GameOver)));
+
+        // Now `fsm` is a separate variable, and we can pass `&mut self` to its methods.
+        match fsm.apply_action(self, action) {
+            Ok(()) => {
+                if fsm.is_final() && !self.final_state {
+                    // The round has ended. Advance the game stage.
+                    // This function will set a new FSM for the new stage, so we don't put the old `fsm` back.
+                    self.advance_to_next_stage_or_showdown();
+                } else {
+                    // The round is not over. Update legal actions for the next player
+                    // and put the updated FSM back into the state.
+                    if !self.final_state {
+                        self.legal_actions = fsm.get_legal_actions(self);
+                        self.legal_actions_detailed = self.compute_legal_actions_detailed();
+                    } else {
+                        // Game is final, no legal actions
+                        self.legal_actions = vec![];
+                        self.legal_actions_detailed = vec![];
+                    }
+                    self.fsm = fsm;
+                }
+            }
+            Err(status) => {
+                self.status = status;
+                // On error, the FSM is now in a terminal state (GameOver).
+                // Put it back to prevent further actions.
+                self.fsm = fsm;
+            }
+        }
+    }
+
+    /// Internal helper to apply action by integer index without requiring Python GIL
+    pub fn apply_action_int_rs(&mut self, action_int: usize) {
+        if self.final_state || self.stage == Stage::Showdown {
+            if !self.final_state {
+                self.handle_showdown();
+            }
+            return;
+        }
+        if action_int >= self.legal_actions_detailed.len() {
+            // Out of range -> mark illegal
+            self.status = StateStatus::IllegalAction;
+            return;
+        }
+        let action = self.legal_actions_detailed[action_int];
+        self.apply_action_rs(action);
     }
 }
 
@@ -1535,7 +1576,7 @@ mod tests {
                         if state.final_state {
                             break;
                         }
-                        let _ = state.apply_action(*action);
+                        state.apply_action_rs(*action);
                     }
                 }
                 Err(_) => {}
@@ -1552,7 +1593,7 @@ mod tests {
                         if state.final_state {
                             break;
                         }
-                        let _ = state.apply_action(action);
+                        state.apply_action_rs(action);
                     }
                     let sum: f64 = state.players_state.iter().map(|ps| ps.reward).sum();
                     prop_assert!((sum).abs() < 1e-9);
